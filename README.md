@@ -253,6 +253,47 @@ Notes:
 - **TSP**: Converges to <5% of optimal on n=50 Euclidean instances.
 - Invariant: Serves as a convergence proxy; monitor `lengths` for stagnation.
 
+## ZetaScope (interactive + cinematic)
+
+ZetaScope is an interactive and cinematic visualizer for zeta-spectral prime scoring. It renders the spectral magnitude |S(n)| constructed from the first K non-trivial zeta zeros, I/Q constellations, and a spectral waterfall as K increases. It also computes quick metrics (precision, recall vs. true primes up to N) and a resonance-like invariant.
+
+![ZetaScope first look](zetascope_first_image.png)
+
+### Install plotting deps
+
+- **Matplotlib** (required):
+  - `pip install matplotlib`
+- **Interactive backend** (one of):
+  - Qt: `pip install pyqt5` and run with `MPLBACKEND=QtAgg`
+  - Tk: install system Tk (`sudo apt-get install python3-tk`) and run with `MPLBACKEND=TkAgg`
+
+If you see `FigureCanvasAgg is non-interactive`, select an interactive backend via `MPLBACKEND=QtAgg` (or `TkAgg`). If running headless, use X forwarding or `xvfb-run` to preview/save frames.
+
+### Static scope (sliders)
+
+```bash
+python -m resfrac.visual.zetascope --N 100000 --zeros 256 --window 1.5
+```
+
+- Plots: `|S(n)|` vs n with true prime overlays; I/Q hexbin; I/Q scatter colored by |S(n)|.
+- UI: sliders for K (zeros) and window power, then click Update.
+- Optional sonification: `--wav primes.wav --wav-zeros 64 --wav-seconds 12.0`.
+
+### Cinematic mode (animated)
+
+```bash
+MPLBACKEND=QtAgg \
+python -m resfrac.visual.zetascope --cinema --N 50000 --Kmax 512 --step 16 --fps 20
+```
+
+- Top: live `|S(n)|` with prime markers and adaptive scaling.
+- Middle-left: I/Q hexbin with a golden spiral overlay.
+- Middle-right: spectral waterfall (rows ≈ increasing K).
+- Bottom: live metrics (precision, recall, invariant, K, frame time).
+- Keybindings: space (pause/resume), left/right (step K), `s` (save PNG), `w` (write short WAV).
+
+Performance tips: for smooth animation keep `N ≤ 80k`, `step ∈ {8,16,32}`, `Kmax ≤ 1024`.
+
 ## Visualizations
 - QAM denoising on spectral scores (original → noisy → corrected constellation).
 ![QAM denoising on spectral score](zeta_qam_toy.png)
