@@ -8,6 +8,9 @@
 import argparse
 import math
 import time
+import os
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -18,8 +21,18 @@ from scipy.io.wavfile import write as wav_write
 
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Slider, Button, CheckButtons
+from matplotlib.widgets import Slider, Button, CheckButtons, TextBox
 from matplotlib.animation import FuncAnimation
+
+# Optional realtime playback
+try:
+    import simpleaudio as sa  # type: ignore
+except Exception:
+    sa = None
+
+# Keep references alive to avoid premature GC/exit
+_last_play_obj = None
+_last_proc = None
 
 _phi = (1 + 5 ** 0.5) / 2.0
 
@@ -94,6 +107,82 @@ def zeta_zero_choir(wav_path: str = "zeta_choir.wav",
     return wav_path
 
 # ------------------------------
+# "Hear a zero" helpers
+# ------------------------------
+
+def zero_frequency(k: int) -> float:
+    """
+    Map gamma_k to an audible frequency with gentle compression.
+    f = 110 Hz * sqrt(gamma_k / gamma_1)
+    """
+    if k < 1:
+        k = 1
+    gammas = riemann_zeros(k)
+    g1 = riemann_zeros(1)[0]
+    gk = gammas[k - 1]
+    return 110.0 * float((gk / g1) ** 0.5)
+
+def synth_tone(f: float, seconds: float = 2.0, sr: int = 44100, gain: float = 0.9) -> np.ndarray:
+    """
+    Render a single tone with a soft Tukey-like envelope to avoid clicks.
+    """
+    t = np.linspace(0, seconds, int(sr * seconds), endpoint=False)
+    y = np.sin(2 * np.pi * f * t)
+    # 10% cosine fade in/out
+    m = max(1, int(0.1 * sr))
+    env = np.ones_like(y)
+    ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, m))
+    env[:m] = ramp
+    env[-m:] = ramp[::-1]
+    y = (y * env)
+    y /= np.max(np.abs(y) + 1e-12)
+    return (gain * y).astype(np.float32)
+
+def write_and_maybe_play(wav_path: str, y: np.ndarray, sr: int = 44100) -> str:
+    from scipy.io.wavfile import write as _wav_write
+    pcm = np.ascontiguousarray((y * 32767).astype(np.int16))
+    _wav_write(wav_path, sr, pcm)
+    return wav_path
+
+def maybe_play_file(wav_path: str):
+    """Attempt to play a WAV file in a robust, non-blocking way.
+    Respects env ZETASCOPE_NO_AUDIO=1 to disable playback.
+    """
+    if os.environ.get("ZETASCOPE_NO_AUDIO") == "1":
+        return
+    global _last_play_obj, _last_proc
+    # Only use simpleaudio if explicitly allowed
+    use_sa = (os.environ.get("ZETASCOPE_USE_SIMPLEAUDIO") == "1")
+    if use_sa and sa is not None:
+        try:
+            wave_obj = sa.WaveObject.from_wave_file(wav_path)
+            _last_play_obj = wave_obj.play()
+            return
+        except Exception:
+            pass
+    # Fallback to system players
+    for player in ("aplay", "paplay", "ffplay"):
+        if shutil.which(player):
+            try:
+                if player == "ffplay":
+                    _last_proc = subprocess.Popen([player, "-autoexit", "-nodisp", wav_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                else:
+                    _last_proc = subprocess.Popen([player, wav_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except Exception:
+                continue
+    print(f"[ZetaScope] Note: no audio player found (set ZETASCOPE_USE_SIMPLEAUDIO=1 to try simpleaudio). File is at {wav_path}")
+
+def hear_zero_k(k: int, seconds: float = 2.0, sr: int = 44100, gain: float = 0.9, out: Optional[str] = None) -> str:
+    """
+    Synthesize and save a tone for the k-th Riemann zero (imag part gamma_k).
+    """
+    f = zero_frequency(k)
+    y = synth_tone(f, seconds=seconds, sr=sr, gain=gain)
+    out = out or f"zeta_zero_k_{k}.wav"
+    return write_and_maybe_play(out, y, sr=sr)
+
+# ------------------------------
 # Static Scope (sliders + update)
 # ------------------------------
 
@@ -145,12 +234,29 @@ class ZetaScopeApp:
         ax_btn = self.fig.add_axes([0.80, 0.05, 0.12, 0.05])
         self.btn = Button(ax_btn, "Update", color="#dddddd", hovercolor="#bbbbbb")
 
+        # Audio controls: textbox for k and two buttons
+        ax_kbox = self.fig.add_axes([0.12, 0.02, 0.08, 0.04])
+        self.tb_k = TextBox(ax_kbox, "k", initial="1")
+
+        ax_hear1 = self.fig.add_axes([0.21, 0.02, 0.16, 0.04])
+        self.btn_hear_k = Button(ax_hear1, "Hear zero k", color="#dddddd", hovercolor="#bbbbbb")
+
+        ax_hearK = self.fig.add_axes([0.38, 0.02, 0.18, 0.04])
+        self.btn_hear_K = Button(ax_hearK, "Hear first K", color="#dddddd", hovercolor="#bbbbbb")
+
+        # Auto-play toggle (checkbox)
+        ax_ap = self.fig.add_axes([0.58, 0.02, 0.16, 0.06])
+        self.chk_autoplay = CheckButtons(ax_ap, labels=["Auto-play"], actives=[False])
+
         self.I = self.Q = self.mag = None
         self.precision = self.recall = None
         self.invariant = None
         self.last_runtime = 0.0
+        self._busy_playback = False
 
         self.btn.on_clicked(lambda evt: self.on_update())
+        self.btn_hear_k.on_clicked(lambda evt: self._on_hear_k())
+        self.btn_hear_K.on_clicked(lambda evt: self._on_hear_K())
         self.recompute()
         self.redraw()
 
@@ -205,6 +311,38 @@ class ZetaScopeApp:
     def on_update(self):
         self.recompute()
         self.redraw()
+
+    def _on_hear_k(self):
+        if self._busy_playback:
+            return
+        self._busy_playback = True
+        try:
+            try:
+                k = int(self.tb_k.text.strip())
+                k = max(1, k)
+            except Exception:
+                k = 1
+            path = hear_zero_k(k, seconds=2.5, gain=0.9)
+            print(f"[ZetaScope] Wrote {path} (k={k}, f≈{zero_frequency(k):.1f} Hz)")
+            if self.chk_autoplay.get_status()[0]:
+                maybe_play_file(path)
+        finally:
+            self._busy_playback = False
+
+    def _on_hear_K(self):
+        if self._busy_playback:
+            return
+        self._busy_playback = True
+        try:
+            K = int(self.s_zero.val)
+            K_play = int(min(96, max(8, K)))
+            print(f"[ZetaScope] Generating short choir for first K={K_play} zeros ...")
+            path = zeta_zero_choir(wav_path=f"zeta_choir_K{K_play}.wav", K=K_play, seconds=10.0)
+            print(f"[ZetaScope] Wrote {path}")
+            if self.chk_autoplay.get_status()[0]:
+                maybe_play_file(path)
+        finally:
+            self._busy_playback = False
 
 # ------------------------------
 # Cinematic mode (animation)
