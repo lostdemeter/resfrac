@@ -149,9 +149,12 @@ print(f"Length evolution: {solver.lengths}")
 - **TSP**: Converges to <5% of optimal on n=50 Euclidean instances.
 - Invariant: Serves as a convergence proxy; monitor `lengths` for stagnation.
 
-## Visualization (Optional)
-The provided images show:
-- Left: QAM denoising on spectral scores (original → noisy → corrected constellation).
-- Right: TSP tour lengths (blue: iterations; red: cities) and final resonant tour (invariant ~3.9).
+## Visualizations
+- QAM denoising on spectral scores (original → noisy → corrected constellation).
+![QAM denoising on spectral score](zeta_qam_toy.png)
+
+- TSP tour lengths (blue: iterations; red: cities) and final resonant tour (invariant ~3.9).
+![TSP tour lengths](resonant_framework_tsp.png)
+
 
 To generate similar plots, extend `resfrac3.py` with `matplotlib` (not required).
