@@ -279,7 +279,7 @@ python -m resfrac.visual.zetascope --N 100000 --zeros 256 --window 1.5
 - UI: sliders for K (zeros) and window power, then click Update.
 - Optional sonification: `--wav primes.wav --wav-zeros 64 --wav-seconds 12.0`.
 
-### Cinematic mode (animated)
+### Cinematic mode (animated) *this is a work in progess, only partially working at the moment*
 
 ```bash
 MPLBACKEND=QtAgg \
@@ -293,6 +293,8 @@ python -m resfrac.visual.zetascope --cinema --N 50000 --Kmax 512 --step 16 --fps
 - Keybindings: space (pause/resume), left/right (step K), `s` (save PNG), `w` (write short WAV).
 
 Performance tips: for smooth animation keep `N ≤ 80k`, `step ∈ {8,16,32}`, `Kmax ≤ 1024`.
+
+![Spiral First Look](spiral_wip.png)
 
 ### Audio: hear Riemann zeros
 
