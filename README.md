@@ -4,7 +4,9 @@
 
 This project explores **resonant fractional methods** for solving hard combinatorial optimization problems, inspired by number theory and spectral analysis. It integrates:
 
-- A **Chudnovsky-like prime sieve** enhanced with Riemann zeta function approximations and QAM (Quadrature Amplitude Modulation) denoising for efficient prime generation up to large bounds.
+- A pluggable **prime backends** system:
+  - Default: a **Chudnovsky-like prime sieve** enhanced with Riemann zeta function approximations and QAM (Quadrature Amplitude Modulation) denoising for efficient prime generation up to large bounds.
+  - Optional: an **SRT Prime Oracle** adapter (if `primes_oracle.py` is available on PYTHONPATH) for experimentation up to ~1e9.
 - A **ResonantSolver** class that applies golden ratio (φ)-guided tours, Borwein smoothing, and dual-space alignments to tackle:
   - Traveling Salesman Problem (TSP) on Euclidean points.
   - 3-SAT instances (via local search with clause barycenter matching).
@@ -19,6 +21,12 @@ Key innovations:
 
 Tested on Python 3.12+; results reproducible with fixed seeds.
 
+## For AI assistants
+
+- Start here: `AI_README.md` in the project root for a condensed quick-start.
+- Prefer the default `ChudnovskyBackend` for primes; `SRTOracleBackend` is for experimentation and is extremely slow on CPU.
+- Use `python -m resfrac.primes.cli --N 100000 --backend chudnovsky` to validate environment quickly.
+
 ## Files
 
 - **`qam_zeta_distilled_full.py`**: Standalone zeta-spectral prime sieve with QAM denoising. Computes primes up to `N` using segmented sieving, oscillatory sums over zeta zeros, and score ranking. Validates against `sympy.primepi`.
@@ -29,8 +37,22 @@ Tested on Python 3.12+; results reproducible with fixed seeds.
   - `ResonantSolver` class for TSP, 3-SAT, and prime solving.
   - `SATGraph` and `PrimeGraph` wrappers for problem representation.
   - `load_dimacs` for parsing CNF files.
-  - Integration of the zeta-sieve for prime mode.
+  - Pluggable prime backends (default Chudnovsky-like sieve; optional SRT).
   - `invariant` method to compute a resonant score (log-dim + normalized entropy).
+
+- **Prime backend modules** (package):
+  - `resfrac/sieves/zeta_chudnovsky.py` – importable Chudnovsky-like sieve.
+  - `resfrac/primes/backends.py` – `PrimeBackend` interface.
+  - `resfrac/primes/chudnovsky_backend.py` – default backend.
+  - `resfrac/primes/srt_backend.py` – optional SRT adapter (requires `primes_oracle` on PYTHONPATH).
+
+- **CLI**:
+  - `python -m resfrac.primes.cli` – run prime enumeration with a selected backend.
+
+- **Crypto demo**:
+  - `resfrac/crypto/rsa.py` – CSPRNG-based RSA key generation with injectable primality function.
+  - `resfrac/crypto/rsa_srt_adapter.py` – optional SRT-backed primality adapter.
+  - `python -m resfrac.crypto.rsa_demo` – minimal encrypt/decrypt demo ("holographic" example; see below).
 
 ## Dependencies
 
@@ -45,6 +67,7 @@ pip install numpy scipy mpmath sympy
 ```
 
 No additional installs needed; all code runs in a standard REPL environment.
+Optional SRT backend requires `primes_oracle.py` on PYTHONPATH (e.g., clone https://github.com/lostdemeter/srt and set `PYTHONPATH=/path/to/srt`).
 
 ## Usage
 
@@ -70,7 +93,7 @@ Missed primes (first 10): []
 Gaps in missed: []
 ```
 
-### 2. Resonant Solver for Primes
+### 2. Resonant Solver for Primes (pluggable backends)
 Use `resfrac3.py` in prime mode for integrated solving with invariant tracking.
 
 ```python
@@ -87,6 +110,18 @@ print(f"Iterations: {len(solver.lengths)-1}, Length evolution: {solver.lengths}"
 
 - Tracks `lengths` (prime counts per iteration; stabilizes quickly).
 - Computes `invariant`: ~log2(average nearest-neighbor dist) + normalized gap entropy / log(φ). Lower values indicate "resonant" solutions.
+
+To explicitly select a backend:
+
+```python
+from resfrac3 import PrimeGraph, ResonantSolver
+from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
+# Optional SRT (requires primes_oracle on PYTHONPATH): from resfrac.primes.srt_backend import SRTOracleBackend
+
+g_default = PrimeGraph(N=100000, backend=ChudnovskyBackend())
+solver = ResonantSolver()
+primes, _ = solver.solve(g_default)
+```
 
 ### 3. 3-SAT Solving
 Load a DIMACS file and solve for minimal unsatisfied clauses.
@@ -142,6 +177,75 @@ print(f"Length evolution: {solver.lengths}")
 - Tour: Cyclic node order (starts/ends at 0).
 - Alternates φ-greedy + Borwein-weighted 2-opt + dual improvements.
 
+## Prime CLI (backend selection)
+
+Run from project root (`/home/thorin/resfrac`):
+
+- **Chudnovsky backend** (default, lightweight):
+```bash
+python -m resfrac.primes.cli --N 100000 --backend chudnovsky
+```
+
+- **SRT backend** (optional; requires SRT on PYTHONPATH):
+```bash
+PYTHONPATH=/path/to/srt \
+python -m resfrac.primes.cli --N 1000000 --backend srt
+```
+
+- Override SRT safety clamp (expert use; may be heavy):
+```bash
+PYTHONPATH=/path/to/srt \
+python -m resfrac.primes.cli --N 2000000000 --backend srt --max-num-override 2000000000
+```
+
+Outputs include backend, N, primes found, expected π(N), runtime, and the first K primes (`--show K`).
+
+> Warning: The pure SRT backend is EXTREMELY slow on classical hardware and is provided only as an example for experimentation. It is not intended for production use. Prefer the default Chudnovsky backend for practical workloads.
+
+### Quick SRT setup (no PYTHONPATH)
+
+If you prefer not to set `PYTHONPATH`, you can place `primes_oracle.py` in the project root so it’s auto-discoverable when you run commands from there:
+
+```bash
+# From project root: /home/thorin/resfrac
+wget -O primes_oracle.py \
+  https://raw.githubusercontent.com/lostdemeter/srt/main/primes_oracle.py
+
+# Optional: verify import
+python - <<'PY'
+import primes_oracle
+print("SRT primes_oracle available:", hasattr(primes_oracle, 'miller_rabin'))
+PY
+
+# Now run SRT backend without changing PYTHONPATH
+python -m resfrac.primes.cli --N 1000000 --backend srt
+```
+
+Notes:
+- This method fetches only `primes_oracle.py`. For the full SRT project, clone the repo instead.
+- Keep in mind any updates to SRT won’t auto-sync when using a single downloaded file.
+
+## RSA demo (holographic encryption example)
+
+This demo illustrates a "holographic" mapping: a small plaintext is compactly embedded as a single big integer and transformed within the modular-exponentiation space (RSA). It’s pedagogical raw RSA without padding.
+
+Generate a demo keypair and encrypt/decrypt a small message (raw RSA, no padding):
+
+```bash
+python -m resfrac.crypto.rsa_demo --bits 1024 --msg "hello resfrac"
+```
+
+Use SRT for primality when available:
+
+```bash
+PYTHONPATH=/path/to/srt \
+python -m resfrac.crypto.rsa_demo --bits 1024 --msg "hi" --use-srt
+```
+
+Notes:
+- For real cryptography, use a vetted library (e.g., PyCA cryptography) with OAEP/PSS padding and proper key handling.
+- If you see "Message integer is >= modulus n", shorten the message or increase `--bits`.
+
 ## Performance Notes
 
 - **Primes**: Near-perfect recall/precision up to 10^6 (runtime ~seconds on CPU). QAM denoising reduces false positives by ~5-10% vs. raw spectral scores.
@@ -149,9 +253,12 @@ print(f"Length evolution: {solver.lengths}")
 - **TSP**: Converges to <5% of optimal on n=50 Euclidean instances.
 - Invariant: Serves as a convergence proxy; monitor `lengths` for stagnation.
 
-## Visualization (Optional)
-The provided images show:
-- Left: QAM denoising on spectral scores (original → noisy → corrected constellation).
-- Right: TSP tour lengths (blue: iterations; red: cities) and final resonant tour (invariant ~3.9).
+## Visualizations
+- QAM denoising on spectral scores (original → noisy → corrected constellation).
+![QAM denoising on spectral score](zeta_qam_toy.png)
+
+- TSP tour lengths (blue: iterations; red: cities) and final resonant tour (invariant ~3.9).
+![TSP tour lengths](resonant_framework_tsp.png)
+
 
 To generate similar plots, extend `resfrac3.py` with `matplotlib` (not required).

@@ -5,6 +5,7 @@ from mpmath import *
 from sympy import primerange, primepi, isprime, mobius
 from math import exp, log, pi, sqrt
 import time
+from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
 
 mp.dps = 20
 
@@ -282,7 +283,7 @@ class ResonantSolver:
         return best, best_score
     
     def _solve_prime(self, graph):
-        primes = chudnovsky_like_sieve(graph.N)
+        primes = graph.backend.primes_up_to(graph.N)
         self.lengths = [len(primes)]
         return primes, len(primes)
     
@@ -346,12 +347,13 @@ class SATGraph:
         angles = 2 * np.pi * np.arange(self.vars) / self.vars if self.vars > 0 else np.array([])
         self.coords = np.column_stack((np.cos(angles), np.sin(angles))) if self.vars > 0 else np.zeros((0, 2))
 
-# New PrimeGraph
+# New PrimeGraph (pluggable prime backend)
 class PrimeGraph:
     type = 'prime'
-    def __init__(self, N=10000):
-        self.N = N
-        self.primes = chudnovsky_like_sieve(N)
+    def __init__(self, N=10000, backend=None):
+        self.N = int(N)
+        self.backend = backend if backend is not None else ChudnovskyBackend()
+        self.primes = self.backend.primes_up_to(self.N)
         self.coords = np.column_stack((np.array(self.primes), np.zeros(len(self.primes))))
 
 def load_dimacs(file_path):

@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+*.log
+
+# Virtual environments
+venv/
+.env/
+.venv/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.whl
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.cache/
+
+# Local data files (generated / downloaded)
+scores.float32.memmap
+generated_primes.txt
+primes_oracle.py
