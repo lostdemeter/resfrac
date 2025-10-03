@@ -314,20 +314,16 @@ aplay zeta_zero_k_1.wav
 ffplay -autoexit -nodisp zeta_choir_K96.wav
 ```
 
-Example WAVs (play directly on GitHub):
+Example WAVs (if you'd like to hear what a zeta zero sounds like without installing the entire project):
 
 <div>
   <p><strong>Zero k=1 (≈110 Hz)</strong></p>
-  <audio controls src="zeta_zero_k_1.wav">
-    Your browser does not support the audio element. Download <a href="zeta_zero_k_1.wav">zeta_zero_k_1.wav</a>.
-  </audio>
+    Download <a href="zeta_zero_k_1.wav">zeta_zero_k_1.wav</a>.
 </div>
 
 <div>
   <p><strong>Choir of first 96 zeros</strong></p>
-  <audio controls src="zeta_choir_K96.wav">
-    Your browser does not support the audio element. Download <a href="zeta_choir_K96.wav">zeta_choir_K96.wav</a>.
-  </audio>
+    Download <a href="zeta_choir_K96.wav">zeta_choir_K96.wav</a>.
 </div>
 
 ## Visualizations
