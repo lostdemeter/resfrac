@@ -314,9 +314,21 @@ aplay zeta_zero_k_1.wav
 ffplay -autoexit -nodisp zeta_choir_K96.wav
 ```
 
-Example WAVs (if present in repo root):
-- [zeta_zero_k_1.wav](../zeta_zero_k_1.wav)
-- [zeta_choir_K96.wav](../zeta_choir_K96.wav)
+Example WAVs (play directly on GitHub):
+
+<div>
+  <p><strong>Zero k=1 (≈110 Hz)</strong></p>
+  <audio controls src="zeta_zero_k_1.wav">
+    Your browser does not support the audio element. Download <a href="zeta_zero_k_1.wav">zeta_zero_k_1.wav</a>.
+  </audio>
+</div>
+
+<div>
+  <p><strong>Choir of first 96 zeros</strong></p>
+  <audio controls src="zeta_choir_K96.wav">
+    Your browser does not support the audio element. Download <a href="zeta_choir_K96.wav">zeta_choir_K96.wav</a>.
+  </audio>
+</div>
 
 ## Visualizations
 - QAM denoising on spectral scores (original → noisy → corrected constellation).
