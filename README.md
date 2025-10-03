@@ -294,6 +294,30 @@ python -m resfrac.visual.zetascope --cinema --N 50000 --Kmax 512 --step 16 --fps
 
 Performance tips: for smooth animation keep `N ≤ 80k`, `step ∈ {8,16,32}`, `Kmax ≤ 1024`.
 
+### Audio: hear Riemann zeros
+
+- In static mode, use the bottom controls:
+  - **k** textbox → choose which zero γ_k.
+  - **Hear zero k** → saves a short tone WAV mapped from γ_k.
+  - **Hear first K** → saves a short “choir” chord from the first K zeros (capped to 96).
+- The UI has an **Auto-play** checkbox. When ON, ZetaScope plays saved WAVs using a system player (`aplay`/`paplay`/`ffplay`) if available. You can also generate a choir from CLI:
+  - `python -m resfrac.visual.zetascope --wav zeta_choir.wav --wav-zeros 64 --wav-seconds 12`
+
+Playback options and env flags:
+- `ZETASCOPE_NO_AUDIO=1` → disables any playback (write-only WAVs).
+- `ZETASCOPE_USE_SIMPLEAUDIO=1` → opt-in to `simpleaudio` playback (may be unstable on some systems).
+- Otherwise, ZetaScope tries external players (recommended): `aplay`, `paplay`, or `ffplay`.
+
+Manual playback examples:
+```bash
+aplay zeta_zero_k_1.wav
+ffplay -autoexit -nodisp zeta_choir_K96.wav
+```
+
+Example WAVs (if present in repo root):
+- [zeta_zero_k_1.wav](../zeta_zero_k_1.wav)
+- [zeta_choir_K96.wav](../zeta_choir_K96.wav)
+
 ## Visualizations
 - QAM denoising on spectral scores (original → noisy → corrected constellation).
 ![QAM denoising on spectral score](zeta_qam_toy.png)
