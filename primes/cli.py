@@ -5,7 +5,7 @@ import argparse
 import sys
 import time
 
-from resfrac3 import PrimeGraph, ResonantSolver
+from resfrac.resfrac3 import PrimeGraph, ResonantSolver
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
 
 
