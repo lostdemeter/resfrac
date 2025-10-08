@@ -5,14 +5,14 @@ import argparse
 import sys
 import time
 
-from resfrac.resfrac3 import PrimeGraph, ResonantSolver
+from resfrac3 import PrimeGraph, ResonantSolver
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
 
 
-def get_backend(name: str, max_num_override: int | None):
+def get_backend(name: str, max_num_override: int | None, holo: bool = False):
     name = (name or "chudnovsky").lower()
     if name in ("chudnovsky", "default"):
-        return ChudnovskyBackend()
+        return ChudnovskyBackend(holo=holo)
     if name in ("srt", "oracle", "srtoracle"):
         try:
             from resfrac.primes.srt_backend import SRTOracleBackend
@@ -46,11 +46,16 @@ def main(argv=None):
         default=10,
         help="Show first K primes in output (0 to disable)",
     )
+    parser.add_argument(
+        "--holo",
+        action="store_true",
+        help="Enable holographic fringe pruning in the sieve and holo invariant in solver",
+    )
     args = parser.parse_args(argv)
 
-    backend = get_backend(args.backend, args.max_num_override)
+    backend = get_backend(args.backend, args.max_num_override, holo=args.holo)
     g = PrimeGraph(N=args.N, backend=backend)
-    solver = ResonantSolver(max_iters=0)
+    solver = ResonantSolver(max_iters=0, holo=args.holo)
 
     t0 = time.time()
     primes, count = solver.solve(g)

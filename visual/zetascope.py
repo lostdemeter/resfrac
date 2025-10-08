@@ -23,6 +23,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button, CheckButtons, TextBox
 from matplotlib.animation import FuncAnimation
+from resfrac.holo_utils import phase_retrieve
 
 # Optional realtime playback
 try:
@@ -208,6 +209,7 @@ class ZetaScopeConfig:
     window_power: float = 1.5
     use_qam: bool = False  # static demo leaves denoise off by default
     seed: int = 42
+    holo: bool = False
 
 class ZetaScopeApp:
     def __init__(self, cfg: ZetaScopeConfig):
@@ -215,6 +217,7 @@ class ZetaScopeApp:
         self.n_vals = np.arange(2, cfg.N + 1, dtype=int)
         self.true_pi = primepi(cfg.N)
         self.gammas = riemann_zeros(cfg.zeros)
+        self.holo = bool(cfg.holo)
 
         matplotlib.rcParams["figure.figsize"] = (12, 8)
         self.fig = plt.figure(constrained_layout=False)
@@ -249,6 +252,8 @@ class ZetaScopeApp:
         self.chk_autoplay = CheckButtons(ax_ap, labels=["Auto-play"], actives=[False])
 
         self.I = self.Q = self.mag = None
+        self.env = None
+        self.phase_var = None
         self.precision = self.recall = None
         self.invariant = None
         self.last_runtime = 0.0
@@ -266,6 +271,14 @@ class ZetaScopeApp:
         self.gammas = riemann_zeros(K)
         window_power = float(self.s_win.val)
         self.I, self.Q, self.mag = spectral_signature(self.n_vals, self.gammas, window_power=window_power)
+        if self.holo:
+            try:
+                env, pvar = phase_retrieve(self.mag.astype(float))
+                self.env = env
+                self.phase_var = float(pvar)
+            except Exception:
+                self.env = None
+                self.phase_var = None
 
         idx = np.argsort(-self.mag)
         k_top = self.true_pi
@@ -282,6 +295,11 @@ class ZetaScopeApp:
         self.ax_mag.clear(); self.ax_iq.clear(); self.ax_iqc.clear(); self.ax_metrics.clear()
 
         self.ax_mag.plot(self.n_vals, self.mag, color="#3366cc", lw=0.8, label="|S(n)|")
+        if self.holo and self.env is not None:
+            # Normalize envelope to comparable scale for overlay
+            scale = max(1e-9, float(np.percentile(self.mag, 99.0)))
+            env_norm = self.env / (np.max(self.env) + 1e-12) * scale
+            self.ax_mag.plot(self.n_vals, env_norm, color="#ff8800", lw=0.8, alpha=0.8, label="Hilbert envelope (holo)")
         self.ax_mag.vlines(self._true_primes, ymin=self.mag.min(), ymax=self.mag.max(), colors="#888888", alpha=0.06, linewidth=0.5)
         self.ax_mag.set_title(f"ZetaScope (static): N={self.cfg.N}, K={len(self.gammas)}, window={self.s_win.val:.2f}")
         self.ax_mag.set_xlabel("n"); self.ax_mag.set_ylabel("|S(n)|"); self.ax_mag.legend(loc="upper right", fontsize=9)
@@ -304,6 +322,8 @@ class ZetaScopeApp:
             f"invariant ≈ {self.invariant:.3f}",
             f"compute time = {self.last_runtime:.2f}s"
         ]
+        if self.holo and self.phase_var is not None:
+            txt.append(f"coherence var ≈ {self.phase_var:.4f}")
         self.ax_metrics.text(0.02, 0.95, "\n".join(txt), va="top", ha="left", family="monospace", fontsize=10)
         self.ax_metrics.set_axis_off()
         self.fig.canvas.draw_idle()
@@ -393,7 +413,7 @@ def golden_spiral(ax, radius=1.0, turns=3, color="#ffaa00", lw=1.2, alpha=0.8):
     ax.plot(x, y, color=color, lw=lw, alpha=alpha)
 
 class ZetaScopeCinematic:
-    def __init__(self, N=50_000, Kmax=512, step=16, window_power=1.5, fps=20, waterfall_rows=120, rng_seed=42):
+    def __init__(self, N=50_000, Kmax=512, step=16, window_power=1.5, fps=20, waterfall_rows=120, rng_seed=42, holo: bool = False):
         self.N = N
         self.Kmax = Kmax
         self.stepK = step
@@ -401,6 +421,7 @@ class ZetaScopeCinematic:
         self.fps = fps
         self.rows = waterfall_rows
         self.rng = np.random.default_rng(rng_seed)
+        self.holo = bool(holo)
 
         self.n_vals = np.arange(2, N + 1, dtype=int)
         self.true_pi = primepi(N)
@@ -544,9 +565,17 @@ class ZetaScopeCinematic:
         self._last_invariant = inv
         self._last_idx = idx
 
+        coh_text = ""
+        if self.holo:
+            try:
+                _, pvar = phase_retrieve(mag.astype(float))
+                coh_text = f", coh-var ≈ {float(pvar):.4f}"
+            except Exception:
+                coh_text = ""
+
         txt = [
             f"K = {self.spec.K_cur}/{self.Kmax}  step={self.stepK}",
-            f"precision = {precision:.4f}, recall = {recall:.4f}",
+            f"precision = {precision:.4f}, recall = {recall:.4f}{coh_text}",
             f"invariant ≈ {inv:.3f}",
             f"frame compute = {self._last_runtime*1000:.1f} ms"
         ]
@@ -561,18 +590,18 @@ class ZetaScopeCinematic:
 # Runner / CLI
 # ------------------------------
 
-def run_static(N: int, zeros: int, window_power: float, wav_out: Optional[str], wav_zeros: int, wav_seconds: float):
+def run_static(N: int, zeros: int, window_power: float, wav_out: Optional[str], wav_zeros: int, wav_seconds: float, holo: bool):
     if wav_out:
         print(f"[ZetaScope] Generating WAV: {wav_out} with K={wav_zeros}, seconds={wav_seconds} ...")
         path = zeta_zero_choir(wav_path=wav_out, K=wav_zeros, seconds=wav_seconds)
         print(f"[ZetaScope] Wrote {path}")
-    cfg = ZetaScopeConfig(N=N, zeros=zeros, window_power=window_power)
+    cfg = ZetaScopeConfig(N=N, zeros=zeros, window_power=window_power, holo=holo)
     app = ZetaScopeApp(cfg)
     plt.show()
 
-def run_cinema(N: int, Kmax: int, step: int, window_power: float, fps: int, rows: int):
+def run_cinema(N: int, Kmax: int, step: int, window_power: float, fps: int, rows: int, holo: bool):
     # Tip: for smoothness, keep N ≤ 80k, Kmax ≤ 1024, step ∈ {8,16,32}
-    app = ZetaScopeCinematic(N=N, Kmax=Kmax, step=step, window_power=window_power, fps=fps, waterfall_rows=rows)
+    app = ZetaScopeCinematic(N=N, Kmax=Kmax, step=step, window_power=window_power, fps=fps, waterfall_rows=rows, holo=holo)
     plt.show()
 
 def main():
@@ -583,6 +612,7 @@ def main():
     p.add_argument("--wav", type=str, default=None, help="Optional: output WAV filename (static mode).")
     p.add_argument("--wav-zeros", type=int, default=64, help="Zeros used for WAV (default 64).")
     p.add_argument("--wav-seconds", type=float, default=12.0, help="Length of WAV in seconds (default 12).")
+    p.add_argument("--holo", action="store_true", help="Enable holographic coherence overlays")
 
     # Cinema options
     p.add_argument("--cinema", action="store_true", help="Run animated cinematic mode.")
@@ -594,10 +624,10 @@ def main():
     args = p.parse_args()
 
     if args.cinema:
-        run_cinema(N=args.N, Kmax=args.Kmax, step=args.step, window_power=args.window, fps=args.fps, rows=args.rows)
+        run_cinema(N=args.N, Kmax=args.Kmax, step=args.step, window_power=args.window, fps=args.fps, rows=args.rows, holo=args.holo)
     else:
         run_static(N=args.N, zeros=args.zeros, window_power=args.window,
-                   wav_out=args.wav, wav_zeros=args.wav_zeros, wav_seconds=args.wav_seconds)
+                   wav_out=args.wav, wav_zeros=args.wav_zeros, wav_seconds=args.wav_seconds, holo=args.holo)
 
 if __name__ == "__main__":
     main()

@@ -6,11 +6,13 @@ from sympy import primerange, primepi, isprime, mobius
 from math import exp, log, pi, sqrt
 import time
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
+from resfrac.holo_utils import holo_bound, holographic_permanent, phase_retrieve
 
 mp.dps = 20
 
 def riemann_R(x, K=50):
     s = mpf(0)
+{{ ... }}
     for n in range(1, K+1):
         mu = mobius(n)
         if mu == 0:
@@ -61,6 +63,15 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
     M = int(ceil(epsilon * approx))
     candidates = segmented_pre_sieve(2, N, B)
     scores = compute_spectral_scores(candidates, gammas, h)
+    # Holographic fringe pruning: emphasize coherent fringes via Hilbert envelope
+    try:
+        env, phase_var = phase_retrieve(scores.astype(float))
+        env_norm = env / (np.max(env) + 1e-12)
+        scores = scores * env_norm
+        if phase_var > 0.1:
+            scores *= 0.8  # light penalty under incoherence
+    except Exception:
+        pass
     mean_s = np.mean(scores)
     sigma_s = max(np.std(scores), 0.01)
     z_scores = (scores - mean_s) / sigma_s
@@ -70,12 +81,13 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
     return sorted(primes)
 
 class ResonantSolver:
-    def __init__(self, phi=(1 + np.sqrt(5)) / 2, alpha=0.05, max_iters=50, borwein_terms=12):
+    def __init__(self, phi=(1 + np.sqrt(5)) / 2, alpha=0.05, max_iters=50, borwein_terms=12, holo=False):
         self.phi = phi
         self.alpha = alpha
         self.max_iters = max_iters
         self.borwein_terms = borwein_terms
         self.lengths = []
+        self.holo = bool(holo)
     
     def _n_points(self, graph, dist_matrix=None):
         if hasattr(graph, 'coords') and graph.coords is not None:
@@ -110,7 +122,9 @@ class ResonantSolver:
             if hasattr(graph, 'coords') and graph.coords is not None:
                 angles = np.arctan2(graph.coords[:, 1] - graph.coords[current, 1],
                                     graph.coords[:, 0] - graph.coords[current, 0])
-                bias = np.exp(-np.abs(angles - (np.pi / self.phi)) / 0.5)
+                # Let alpha act as a phase-bias width controller (holo tuning influences path selection)
+                width = max(0.15, 0.5 * (1.0 + float(self.alpha)))
+                bias = np.exp(-np.abs(angles - (np.pi / self.phi)) / width)
             else:
                 bias = np.ones(n_local)
             scores = dists / (1 + bias)
@@ -174,6 +188,13 @@ class ResonantSolver:
             curr_score = self.score_solution(tour, graph, dist_matrix)
             if cand_score < curr_score:
                 return candidate_tour, cand_score
+            # Holographic gating: accept if holo-bound sharpens
+            if self.holo:
+                try:
+                    if self.invariant(graph, candidate_tour) < self.invariant(graph, tour):
+                        return candidate_tour, cand_score
+                except Exception:
+                    pass
         return tour, self.score_solution(tour, graph, dist_matrix)
     
     def score_solution(self, solution, graph, dist_matrix=None):
@@ -202,7 +223,15 @@ class ResonantSolver:
                 b_dist = self.borwein_weights(dist_matrix)
                 tour_temp = self.phi_greedy(graph, b_dist)
                 tour_open = self.two_opt(tour_temp[:-1], b_dist)
-                tour = np.append(tour_open, tour_open[0])
+                candidate = np.append(tour_open, tour_open[0])
+                if self.holo:
+                    try:
+                        if self.invariant(graph, candidate) < self.invariant(graph, tour):
+                            tour = candidate
+                    except Exception:
+                        tour = candidate
+                else:
+                    tour = candidate
             tour, new_score = self.dual_improve(tour, graph, dist_matrix)
             self.lengths.append(new_score)
             if abs(new_score - self.lengths[-2]) < 1e-4:
@@ -239,7 +268,13 @@ class ResonantSolver:
             for v in range(n_vars):
                 assign[v] ^= 1
                 s = sat_score(assign)
-                if s <= best_score:
+                accept = (s <= best_score)
+                if self.holo and not accept:
+                    try:
+                        accept = (self.invariant(graph, assign) < self.invariant(graph, best))
+                    except Exception:
+                        accept = False
+                if accept:
                     best_score = s
                     best = assign.copy()
                     improved = True
@@ -273,7 +308,13 @@ class ResonantSolver:
                     if v_mid @ v_var < np.cos(np.pi / self.phi):
                         candidate[c] ^= 1
                 cand_score = sat_score(candidate)
-                if cand_score <= best_score:
+                accept = (cand_score <= best_score)
+                if self.holo and not accept:
+                    try:
+                        accept = (self.invariant(graph, candidate) < self.invariant(graph, best))
+                    except Exception:
+                        accept = False
+                if accept:
                     best = candidate
                     best_score = cand_score
                     improved = True
@@ -287,7 +328,13 @@ class ResonantSolver:
         self.lengths = [len(primes)]
         return primes, len(primes)
     
-    def solve(self, graph, dist_matrix=None):
+    def solve(self, graph, dist_matrix=None, _tuning: bool = False):
+        # Optional pre-solve phase tuning for holographic mode
+        if self.holo and not _tuning:
+            try:
+                self.phase_tune(graph)
+            except Exception:
+                pass
         problem_type = getattr(graph, 'type', 'tsp')
         if problem_type == 'tsp':
             return self._solve_tsp(graph)
@@ -298,7 +345,7 @@ class ResonantSolver:
         else:
             raise NotImplementedError(f'Unknown problem type: {problem_type}')
     
-    def invariant(self, graph, solution):
+    def _old_invariant(self, graph, solution):
         if hasattr(graph, 'coords') and graph.coords is not None:
             n_pts = graph.coords.shape[0]
             k = min(4, n_pts)
@@ -313,6 +360,69 @@ class ResonantSolver:
         probs = hist / hist.sum() if hist.sum() else np.ones_like(hist) / len(hist)
         H = -np.sum(probs * np.log2(probs + 1e-12))
         return d + H / np.log(self.phi)
+
+    def _build_adjacency(self, g, solution):
+        problem_type = getattr(g, 'type', 'tsp')
+        if problem_type == 'tsp' and hasattr(g, 'coords') and g.coords is not None:
+            n = len(solution) - 1 if (len(solution) > 0 and solution[0] == solution[-1]) else len(solution)
+            adj = np.zeros((n, n), dtype=float)
+            # ensure closed tour order
+            if len(solution) == n:
+                full = list(solution) + [solution[0]]
+            else:
+                full = list(solution)
+            for i in range(n):
+                u, v = full[i], full[(i + 1) % n]
+                adj[u, v] = float(np.linalg.norm(g.coords[u] - g.coords[v]))
+            return adj
+        elif problem_type == 'sat_3':
+            n_vars = g.vars
+            n_clauses = len(getattr(g, 'clauses', []))
+            inc = np.zeros((n_vars, n_clauses), dtype=float) if n_clauses > 0 else np.zeros((n_vars, 1), dtype=float)
+            for c_idx, clause in enumerate(getattr(g, 'clauses', [])):
+                for (var, neg) in clause:
+                    satisfied = bool(solution[var] ^ neg)  # True if this literal satisfies clause
+                    inc[var, c_idx] = 1.0 if satisfied else 0.0
+            # Project to variable-variable affinity (square) for determinant proxy
+            adj = inc @ inc.T if inc.size > 0 else np.eye(max(1, n_vars))
+            return adj
+        elif problem_type == 'prime':
+            # Use simple 1D distances between consecutive primes as a ring
+            seq = np.array(solution, dtype=float)
+            if seq.size < 2:
+                return np.eye(max(1, seq.size))
+            n = seq.size
+            adj = np.zeros((n, n), dtype=float)
+            for i in range(n - 1):
+                adj[i, i + 1] = seq[i + 1] - seq[i]
+            return adj
+        # Fallback
+        m = len(solution) if hasattr(solution, '__len__') else 1
+        return np.eye(max(1, m))
+
+    def invariant(self, graph, solution):
+        if not self.holo:
+            return self._old_invariant(graph, solution)
+        # Holographic invariant: log_dim + H_boundary/log_phi - log2(perm)
+        problem_type = getattr(graph, 'type', 'tsp')
+        if problem_type == 'tsp' and hasattr(graph, 'coords') and graph.coords is not None:
+            dim = graph.coords.shape[0]
+        elif problem_type == 'sat_3':
+            dim = graph.vars
+        elif problem_type == 'prime':
+            dim = getattr(graph, 'N', len(solution))
+        else:
+            dim = len(solution) if hasattr(solution, '__len__') else 1
+        log_dim = np.log2(max(1.0, float(dim)))
+        gaps = self._get_gaps(solution, graph)
+        gsum = float(np.sum(gaps)) if np.size(gaps) > 0 else 0.0
+        if gsum <= 0.0:
+            H_boundary = 0.0
+        else:
+            p = np.asarray(gaps, dtype=float) / (gsum + 1e-12)
+            H_boundary = float(-np.sum(p * np.log2(p + 1e-12)))
+        adj = self._build_adjacency(graph, solution)
+        return holo_bound(log_dim, H_boundary, adj)
     
     def _get_gaps(self, solution, graph):
         problem_type = getattr(graph, 'type', 'tsp')
@@ -327,6 +437,40 @@ class ResonantSolver:
             a = np.asarray(solution, dtype=int)
             diffs = np.abs(np.diff(a, append=a[0]))
             return diffs
+
+    # -----------------
+    # Holographic phase tuning (alpha)
+    # -----------------
+    def phase_tune(self, g, initial_alpha: float = 0.05, max_tune_iters: int = 8):
+        from scipy.optimize import minimize
+        bounds = [(0.05, 0.2)]
+        def _loss(a_arr):
+            a = float(a_arr[0])
+            old_alpha, old_iters = self.alpha, self.max_iters
+            try:
+                self.alpha = a
+                # lightweight inner solve pass
+                self.max_iters = max(3, int(0.2 * old_iters))
+                sol = None
+                res = self.solve(g, _tuning=True)
+                # normalize to solution only for invariant eval
+                if isinstance(res, tuple):
+                    sol = res[0]
+                else:
+                    sol = res
+                return float(self.invariant(g, sol))
+            except Exception:
+                return 1e9
+            finally:
+                self.alpha = old_alpha
+                self.max_iters = old_iters
+        try:
+            res = minimize(_loss, x0=[initial_alpha], method='L-BFGS-B', bounds=bounds, options={'maxiter': max_tune_iters})
+            if res.success:
+                self.alpha = float(res.x[0])
+            return float(res.fun), float(self.alpha)
+        except Exception:
+            return float('nan'), float(self.alpha)
 
 # Existing SATGraph
 class SATGraph:

@@ -5,6 +5,7 @@ from mpmath import im, li, mpf
 from sympy import primerange, isprime, mobius, primepi
 from math import exp, log, sqrt, ceil
 import mpmath as mp
+from resfrac.holo_utils import phase_retrieve
 mp.dps = 20
 
 def riemann_R(x, K=50):
@@ -50,7 +51,7 @@ def compute_spectral_scores(candidates, gammas, h):
     scores = (psi_plus - psi_minus) / (2 * h * np.array(candidates) * logn_arr)
     return scores
 
-def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
+def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2, holo: bool = False):
     gammas = get_gammas_dynamic(T)
     B = int(sqrt(N)) + 1
     mid = N / 2
@@ -59,6 +60,15 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
     M = int(ceil(epsilon * approx))
     candidates = segmented_pre_sieve(2, N, B)
     scores = compute_spectral_scores(candidates, gammas, h)
+    if holo:
+        try:
+            env, phase_var = phase_retrieve(np.asarray(scores, dtype=float))
+            env_norm = env / (np.max(env) + 1e-12)
+            scores = scores * env_norm
+            if phase_var > 0.1:
+                scores *= 0.8
+        except Exception:
+            pass
     top_idx = np.argsort(-scores)[:M]
     top_candidates = np.array(candidates)[top_idx]
     primes = [int(c) for c in top_candidates if isprime(int(c))]

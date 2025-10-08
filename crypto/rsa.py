@@ -1,7 +1,16 @@
 # resfrac/crypto/rsa.py
 import secrets
-from math import gcd
-from typing import Callable, Tuple
+from math import gcd, log2
+from typing import Callable, Tuple, List
+import numpy as np
+
+# Optional holographic helpers
+try:
+    from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
+    from resfrac.holo_utils import holographic_permanent
+except Exception:  # pragma: no cover - optional
+    ChudnovskyBackend = None  # type: ignore
+    holographic_permanent = None  # type: ignore
 
 _SMALL_PRIMES = [3,5,7,11,13,17,19,23,29,31,37,41,43,47,53,59,61,67,71,73,79,83,89,97]
 
@@ -81,3 +90,46 @@ def generate_rsa_keypair(bits: int = 2048, e: int = 65537,
     dq = d % (q - 1)
     qinv = pow(q, -1, p)
     return (n, e), (n, d, p, q, dp, dq, qinv)
+
+
+# -----------------------------
+# Holographic helpers (demo only)
+# -----------------------------
+def sieve_primes_via_zeta(N: int = 50000, holo: bool = True) -> List[int]:
+    """Return primes up to N using the Chudnovsky sieve (optionally with holo pruning).
+
+    Note: This is for demo/visualization; not suitable for cryptographic prime generation.
+    """
+    if ChudnovskyBackend is None:
+        raise RuntimeError("ChudnovskyBackend unavailable in runtime")
+    backend = ChudnovskyBackend(holo=holo)
+    return backend.primes_up_to(int(N))
+
+
+def select_low_entropy_pair(primes: List[int]) -> Tuple[int, int]:
+    """Select a prime pair (p, q) by minimizing a simple holographic-bound proxy.
+
+    Proxy: Given consecutive primes p<q with gap g, build a 2x2 adjacency with off-diagonal
+    weight g. The skew-det proxy yields |g|, so larger gaps lower the bound (sharper boundary).
+    Returns the pair (p, q) that minimizes: -log2(|perm|+1e-10).
+    """
+    if len(primes) < 2:
+        raise ValueError("Need at least two primes to select a pair")
+    best_pair = (primes[0], primes[1])
+    best_score = float("inf")
+    for i in range(len(primes) - 1):
+        p, q = int(primes[i]), int(primes[i + 1])
+        g = q - p
+        if g <= 0:
+            continue
+        if holographic_permanent is None:
+            score = -log2(max(1e-10, float(g)))
+        else:
+            adj = np.array([[0.0, float(g)], [0.0, 0.0]], dtype=float)
+            # skew will be [[0, g/2], [-g/2, 0]] leading to perm ~ |g|/sqrt(2); constant factors cancel in comparisons
+            perm_proxy = float(holographic_permanent(adj))
+            score = -log2(perm_proxy + 1e-10)
+        if score < best_score:
+            best_score = score
+            best_pair = (p, q)
+    return best_pair

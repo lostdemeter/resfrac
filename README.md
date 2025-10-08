@@ -7,7 +7,7 @@ This project explores **resonant fractional methods** for solving hard combinato
 - A pluggable **prime backends** system:
   - Default: a **Chudnovsky-like prime sieve** enhanced with Riemann zeta function approximations and QAM (Quadrature Amplitude Modulation) denoising for efficient prime generation up to large bounds.
   - Optional: an **SRT Prime Oracle** adapter (if `primes_oracle.py` is available on PYTHONPATH) for experimentation up to ~1e9.
-- A **ResonantSolver** class that applies golden ratio (φ)-guided tours, Borwein smoothing, and dual-space alignments to tackle:
+- A **ResonantSolver** class that applies golden ratio (φ)-guided tours, Borwein smoothing, dual-space alignments, and (optionally) a new **holographic invariant** to tackle:
   - Traveling Salesman Problem (TSP) on Euclidean points.
   - 3-SAT instances (via local search with clause barycenter matching).
   - Prime enumeration (leveraging the zeta-sieve).
@@ -17,6 +17,7 @@ The core idea draws from resonant invariants (e.g., fractal dimensions + Shannon
 Key innovations:
 - Spectral scoring via non-trivial zeta zeros for prime detection.
 - Hilbert-embedded QAM correction to denoise candidate scores.
+- Holographic mode: treat zeta sums as interference fringes, invariants as entropy-bounded surfaces, and solvers as wavefront reconstructions. Includes boundary encodings (Valiant-style), phase retrieval (Hilbert/QAM), and zero-fiducials for calibration.
 - φ-biased greedy tours with 2-opt refinement and dual flips for TSP/SAT.
 
 Tested on Python 3.12+; results reproducible with fixed seeds.
@@ -123,6 +124,25 @@ solver = ResonantSolver()
 primes, _ = solver.solve(g_default)
 ```
 
+#### Holographic mode (primes)
+
+- Enable holographic fringe pruning in the sieve and holo-invariant evaluation in the solver by passing `--holo` to the CLI (or `holo=True` in Python):
+
+```bash
+python -m resfrac.primes.cli --N 100000 --backend chudnovsky --holo
+```
+
+In Python:
+
+```python
+from resfrac3 import PrimeGraph, ResonantSolver
+from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
+
+g = PrimeGraph(N=100000, backend=ChudnovskyBackend(holo=True))
+solver = ResonantSolver(holo=True)
+primes, _ = solver.solve(g)
+```
+
 ### 3. 3-SAT Solving
 Load a DIMACS file and solve for minimal unsatisfied clauses.
 
@@ -130,7 +150,7 @@ Load a DIMACS file and solve for minimal unsatisfied clauses.
 from resfrac3 import load_dimacs, ResonantSolver
 
 sat_g = load_dimacs('uf50-0218.cnf')  # 50 vars, 218 clauses
-solver = ResonantSolver(max_iters=100, alpha=0.05)
+solver = ResonantSolver(max_iters=100, alpha=0.05, holo=False)  # set holo=True to use holographic gating
 assignment, unsat = solver.solve(sat_g)
 invariant = solver.invariant(sat_g, assignment)
 
@@ -166,7 +186,7 @@ np.random.seed(42)
 coords = np.random.rand(10, 2)
 tsp_g = TSPGraph(coords)
 
-solver = ResonantSolver(max_iters=50)
+solver = ResonantSolver(max_iters=50, holo=False)  # set holo=True to use holographic gating and phase tuning
 tour, length = solver.solve(tsp_g)[:-1]  # Exclude closing edge
 invariant = solver.invariant(tsp_g, tour)
 
@@ -199,6 +219,12 @@ python -m resfrac.primes.cli --N 2000000000 --backend srt --max-num-override 200
 ```
 
 Outputs include backend, N, primes found, expected π(N), runtime, and the first K primes (`--show K`).
+
+Holographic sieve pruning (coherence-gated):
+
+```bash
+python -m resfrac.primes.cli --N 100000 --backend chudnovsky --holo
+```
 
 > Warning: The pure SRT backend is EXTREMELY slow on classical hardware and is provided only as an example for experimentation. It is not intended for production use. Prefer the default Chudnovsky backend for practical workloads.
 
@@ -272,7 +298,7 @@ If you see `FigureCanvasAgg is non-interactive`, select an interactive backend v
 ### Static scope (sliders)
 
 ```bash
-python -m resfrac.visual.zetascope --N 100000 --zeros 256 --window 1.5
+python -m resfrac.visual.zetascope --N 100000 --zeros 256 --window 1.5 --holo
 ```
 
 - Plots: `|S(n)|` vs n with true prime overlays; I/Q hexbin; I/Q scatter colored by |S(n)|.
@@ -283,13 +309,14 @@ python -m resfrac.visual.zetascope --N 100000 --zeros 256 --window 1.5
 
 ```bash
 MPLBACKEND=QtAgg \
-python -m resfrac.visual.zetascope --cinema --N 50000 --Kmax 512 --step 16 --fps 20
+python -m resfrac.visual.zetascope --cinema --N 50000 --Kmax 512 --step 16 --fps 20 --holo
 ```
 
 - Top: live `|S(n)|` with prime markers and adaptive scaling.
 - Middle-left: I/Q hexbin with a golden spiral overlay.
 - Middle-right: spectral waterfall (rows ≈ increasing K).
 - Bottom: live metrics (precision, recall, invariant, K, frame time).
+- With `--holo`, overlays include a Hilbert-envelope of |S(n)| and a coherence variance metric.
 - Keybindings: space (pause/resume), left/right (step K), `s` (save PNG), `w` (write short WAV).
 
 Performance tips: for smooth animation keep `N ≤ 80k`, `step ∈ {8,16,32}`, `Kmax ≤ 1024`.
@@ -337,3 +364,30 @@ Example WAVs (if you'd like to hear what a zeta zero sounds like without install
 
 
 To generate similar plots, extend `resfrac3.py` with `matplotlib` (not required).
+
+## Holographic Quickstart
+
+- Enable holo in solver:
+
+```python
+solver = ResonantSolver(holo=True)              # enables holo invariant and α phase tuning
+tour, length, _ = solver.solve(tsp_graph)       # TSP: candidate acceptance gated by Δholo < 0
+assignment, unsat = solver.solve(sat_graph)     # SAT: local flips and dual jumps gated by Δholo
+```
+
+- Enable holo sieve and visualize coherence:
+
+```bash
+python -m resfrac.primes.cli --N 100000 --backend chudnovsky --holo
+python -m resfrac.visual.zetascope --N 100000 --zeros 256 --holo
+```
+
+## Benchmarks
+
+Run the included benchmark script to compare fixed vs holographic mode:
+
+```bash
+python bench_holo.py --trials 10 --tsp-n 15 --sat uf50-0218.cnf --primeN 100000
+```
+
+Reports per-task metrics and holo-bounds. Expect modest improvements (problem-dependent) due to coherence gating and phase tuning.
