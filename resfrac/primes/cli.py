@@ -55,7 +55,9 @@ def main(argv=None):
 
     backend = get_backend(args.backend, args.max_num_override, holo=args.holo)
     g = PrimeGraph(N=args.N, backend=backend)
-    solver = ResonantSolver(max_iters=0, holo=args.holo)
+    # Do not enable solver.holo for pure prime enumeration to avoid any optional tuning overhead.
+    # Holographic behavior for primes is entirely handled inside the backend sieve when --holo is set.
+    solver = ResonantSolver(max_iters=0, holo=False)
 
     t0 = time.time()
     primes, count = solver.solve(g)

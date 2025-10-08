@@ -7,12 +7,8 @@ from math import exp, log, pi, sqrt
 import time
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
 from resfrac.holo_utils import holo_bound, holographic_permanent, phase_retrieve
-
-mp.dps = 20
-
 def riemann_R(x, K=50):
     s = mpf(0)
-{{ ... }}
     for n in range(1, K+1):
         mu = mobius(n)
         if mu == 0:
@@ -188,10 +184,11 @@ class ResonantSolver:
             curr_score = self.score_solution(tour, graph, dist_matrix)
             if cand_score < curr_score:
                 return candidate_tour, cand_score
-            # Holographic gating: accept if holo-bound sharpens
+            # Holographic gating: accept if small tolerance and holo-bound sharpens
             if self.holo:
                 try:
-                    if self.invariant(graph, candidate_tour) < self.invariant(graph, tour):
+                    if (cand_score <= curr_score * (1.0 + 0.005)) and \
+                       (self.invariant(graph, candidate_tour) < self.invariant(graph, tour)):
                         return candidate_tour, cand_score
                 except Exception:
                     pass
@@ -268,16 +265,18 @@ class ResonantSolver:
             for v in range(n_vars):
                 assign[v] ^= 1
                 s = sat_score(assign)
-                accept = (s <= best_score)
-                if self.holo and not accept:
-                    try:
-                        accept = (self.invariant(graph, assign) < self.invariant(graph, best))
-                    except Exception:
-                        accept = False
-                if accept:
+                # In SAT, do not accept worse unsat counts; use holo invariant only as tie-breaker
+                if s < best_score:
                     best_score = s
                     best = assign.copy()
                     improved = True
+                elif s == best_score and self.holo:
+                    try:
+                        if self.invariant(graph, assign) < self.invariant(graph, best):
+                            best = assign.copy()
+                            improved = True
+                    except Exception:
+                        pass
                 else:
                     assign[v] ^= 1
             self.lengths.append(best_score)
@@ -308,16 +307,17 @@ class ResonantSolver:
                     if v_mid @ v_var < np.cos(np.pi / self.phi):
                         candidate[c] ^= 1
                 cand_score = sat_score(candidate)
-                accept = (cand_score <= best_score)
-                if self.holo and not accept:
-                    try:
-                        accept = (self.invariant(graph, candidate) < self.invariant(graph, best))
-                    except Exception:
-                        accept = False
-                if accept:
+                if cand_score < best_score:
                     best = candidate
                     best_score = cand_score
                     improved = True
+                elif cand_score == best_score and self.holo:
+                    try:
+                        if self.invariant(graph, candidate) < self.invariant(graph, best):
+                            best = candidate
+                            improved = True
+                    except Exception:
+                        pass
             
             if not improved:
                 break
@@ -329,13 +329,13 @@ class ResonantSolver:
         return primes, len(primes)
     
     def solve(self, graph, dist_matrix=None, _tuning: bool = False):
-        # Optional pre-solve phase tuning for holographic mode
-        if self.holo and not _tuning:
+        # Optional pre-solve phase tuning for holographic mode (skip for primes)
+        problem_type = getattr(graph, 'type', 'tsp')
+        if self.holo and not _tuning and problem_type in ('tsp', 'sat_3'):
             try:
                 self.phase_tune(graph)
             except Exception:
                 pass
-        problem_type = getattr(graph, 'type', 'tsp')
         if problem_type == 'tsp':
             return self._solve_tsp(graph)
         elif problem_type == 'sat_3':
@@ -407,22 +407,37 @@ class ResonantSolver:
         problem_type = getattr(graph, 'type', 'tsp')
         if problem_type == 'tsp' and hasattr(graph, 'coords') and graph.coords is not None:
             dim = graph.coords.shape[0]
+            gaps = self._get_gaps(solution, graph)
+            gsum = float(np.sum(gaps)) if np.size(gaps) > 0 else 0.0
+            H_boundary = 0.0 if gsum <= 0.0 else float(-np.sum((gaps/ (gsum+1e-12)) * np.log2(gaps/(gsum+1e-12) + 1e-12)))
+            adj = self._build_adjacency(graph, solution)
+            return holo_bound(np.log2(max(1.0, float(dim))), H_boundary, adj)
         elif problem_type == 'sat_3':
+            # Use clause satisfaction entropy; avoid determinant term to prevent instability
             dim = graph.vars
+            # Clause satisfaction vector
+            sat = []
+            for clause in graph.clauses:
+                lits = [(solution[var] ^ neg) for var, neg in clause]
+                sat.append(1.0 if any(lits) else 0.0)
+            sat = np.array(sat, dtype=float)
+            if sat.size == 0:
+                H_boundary = 0.0
+            else:
+                p_s = sat.mean()
+                p_vec = np.array([p_s, 1.0 - p_s], dtype=float)
+                H_boundary = float(-np.sum(p_vec * np.log2(p_vec + 1e-12)))
+            return float(np.log2(max(1.0, float(dim))) + H_boundary / np.log((1 + np.sqrt(5)) / 2))
         elif problem_type == 'prime':
             dim = getattr(graph, 'N', len(solution))
+            gaps = self._get_gaps(solution, graph)
+            gsum = float(np.sum(gaps)) if np.size(gaps) > 0 else 0.0
+            H_boundary = 0.0 if gsum <= 0.0 else float(-np.sum((gaps/ (gsum+1e-12)) * np.log2(gaps/(gsum+1e-12) + 1e-12)))
+            # No determinant term for primes in invariant to keep it lightweight
+            return float(np.log2(max(1.0, float(dim))) + H_boundary / np.log((1 + np.sqrt(5)) / 2))
         else:
             dim = len(solution) if hasattr(solution, '__len__') else 1
-        log_dim = np.log2(max(1.0, float(dim)))
-        gaps = self._get_gaps(solution, graph)
-        gsum = float(np.sum(gaps)) if np.size(gaps) > 0 else 0.0
-        if gsum <= 0.0:
-            H_boundary = 0.0
-        else:
-            p = np.asarray(gaps, dtype=float) / (gsum + 1e-12)
-            H_boundary = float(-np.sum(p * np.log2(p + 1e-12)))
-        adj = self._build_adjacency(graph, solution)
-        return holo_bound(log_dim, H_boundary, adj)
+            return float(np.log2(max(1.0, float(dim))))
     
     def _get_gaps(self, solution, graph):
         problem_type = getattr(graph, 'type', 'tsp')
