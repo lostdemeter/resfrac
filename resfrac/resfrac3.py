@@ -77,13 +77,17 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
     return sorted(primes)
 
 class ResonantSolver:
-    def __init__(self, phi=(1 + np.sqrt(5)) / 2, alpha=0.05, max_iters=50, borwein_terms=12, holo=False):
+    def __init__(self, phi=(1 + np.sqrt(5)) / 2, alpha=0.05, max_iters=50, borwein_terms=12, holo=False,
+                 rh_constraint: bool = False, calib_weighting: str = 'none'):
         self.phi = phi
         self.alpha = alpha
         self.max_iters = max_iters
         self.borwein_terms = borwein_terms
         self.lengths = []
         self.holo = bool(holo)
+        # Experimental options
+        self.rh_constraint = bool(rh_constraint)
+        self.calib_weighting = str(calib_weighting)
     
     def _n_points(self, graph, dist_matrix=None):
         if hasattr(graph, 'coords') and graph.coords is not None:
@@ -416,7 +420,7 @@ class ResonantSolver:
             gsum = float(np.sum(gaps)) if np.size(gaps) > 0 else 0.0
             H_boundary = 0.0 if gsum <= 0.0 else float(-np.sum((gaps/ (gsum+1e-12)) * np.log2(gaps/(gsum+1e-12) + 1e-12)))
             adj = self._build_adjacency(graph, solution)
-            return holo_bound(np.log2(max(1.0, float(dim))), H_boundary, adj)
+            return holo_bound(np.log2(max(1.0, float(dim))), H_boundary, adj, rh_constraint=self.rh_constraint)
         elif problem_type == 'sat_3':
             # Use clause satisfaction entropy; avoid determinant term to prevent instability
             dim = graph.vars
@@ -472,7 +476,7 @@ class ResonantSolver:
                 tour0 = np.append(tour0_open, tour0_open[0])
                 gaps0 = self._get_gaps(tour0, g)
                 fid = get_zeta_fiducials(50)
-                alpha_shift, circ_var = zero_calibrate(gaps0, fid, tol=0.1)
+                alpha_shift, circ_var = zero_calibrate(gaps0, fid, tol=0.1, weighting=getattr(self, 'calib_weighting', 'none'))
                 if alpha_shift is not None:
                     initial_alpha = float(np.clip(initial_alpha + alpha_shift, 0.05, 0.2))
         except Exception:

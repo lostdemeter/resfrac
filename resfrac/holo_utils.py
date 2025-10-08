@@ -48,16 +48,33 @@ def phase_retrieve(signal_1d):  # Extend QAM: Hilbert envelope for fringe cohere
     return env, float(np.var(phase))
 
 
-def holo_bound(log_dim, H_boundary, adj=None):
-    """Invariant as entropy surface: dim + disorder/φ - log(perm).
+def holo_bound(log_dim, H_boundary, adj=None, rh_constraint: bool = False):
+    """Invariant as entropy surface: dim + disorder/φ - log(perm) [+ optional RH penalty].
 
     Lower is better (sharper hologram). If adj is None, the permanent proxy is 1.
     Mixed log bases (log2 for dim/entropy; ln for perm) are acceptable for a
     heuristic invariant; only relative differences are used for acceptance.
+
+    If ``rh_constraint`` is True, add a soft penalty when the boundary signal implied
+    by ``adj`` appears highly irregular (proxy for off-critical behavior). This is
+    intentionally heuristic and lightweight.
     """
     perm = holographic_permanent(adj) if adj is not None else 1.0
-    # Stabilize near-zero permanents to avoid -inf
-    return float(log_dim + H_boundary / log_phi - np.log2(perm + 1e-10))
+    # Base invariant
+    inv = float(log_dim + H_boundary / log_phi - np.log2(perm + 1e-10))
+    if rh_constraint and adj is not None:
+        try:
+            # Proxy boundary signal: row-sum differences
+            rs = np.sum(np.asarray(adj, dtype=float), axis=1)
+            gaps = np.abs(np.diff(rs))
+            if gaps.size > 0:
+                # Threshold scaled by log(1+log_dim) to be dimension-aware
+                thr = float(np.log(1.0 + max(0.0, float(log_dim))))
+                if np.var(gaps) > thr:
+                    inv += 10.0  # heavy but constant penalty
+        except Exception:
+            pass
+    return float(inv)
 
 
 # ------------------------------
@@ -69,7 +86,8 @@ def get_zeta_fiducials(K: int = 50) -> np.ndarray:
     return np.array([float(complex(zetazero(k)).imag) for k in range(1, K + 1)], dtype=float)
 
 
-def zero_calibrate(gaps: np.ndarray, fiducials: np.ndarray, tol: float = 0.1):
+def zero_calibrate(gaps: np.ndarray, fiducials: np.ndarray, tol: float = 0.1,
+                   weighting: str = "none"):
     """Calibrate against RH zero fringes.
 
     Parameters
@@ -80,6 +98,12 @@ def zero_calibrate(gaps: np.ndarray, fiducials: np.ndarray, tol: float = 0.1):
         Array of zeta zero imaginaries (gamma_k) to synthesize a fringe reference.
     tol : float
         Maximum circular variance tolerated to consider the signal coherent.
+
+    Parameters
+    ----------
+    weighting : {"none", "inv_gamma", "pair_corr"}
+        Optional weighting of zero contributions. "inv_gamma" scales by 1/γ_k.
+        "pair_corr" uses a simple GUE-style pair-correlation weight 1 - sin^2(πγ)/(πγ)^2.
 
     Returns
     -------
@@ -96,9 +120,22 @@ def zero_calibrate(gaps: np.ndarray, fiducials: np.ndarray, tol: float = 0.1):
     scale = np.log(max(t, 1e-12) + 1e-12)
     if not np.isfinite(scale) or scale == 0.0:
         scale = 1.0
+    zs = np.asarray(fiducials, dtype=float).ravel()
+    if weighting == "inv_gamma":
+        w = 1.0 / (np.abs(zs) + 1e-12)
+    elif weighting == "pair_corr":
+        # 1 - sin^2(pi z)/(pi z)^2, safe for large z
+        zpi = np.pi * zs
+        denom = np.where(np.abs(zpi) < 1e-12, 1e-12, zpi)
+        w = 1.0 - (np.sin(zpi) ** 2) / (denom ** 2)
+        w = np.clip(w, 0.0, 1.0)
+    else:
+        w = np.ones_like(zs)
+    # Normalize weights to avoid scale blow-up
+    w = w / (np.linalg.norm(w) + 1e-12)
     zero_fringe = np.zeros_like(gaps, dtype=float)
-    for z in np.asarray(fiducials, dtype=float):
-        zero_fringe += np.sin(z * gaps / scale)
+    for z, wz in zip(zs, w):
+        zero_fringe += float(wz) * np.sin(z * gaps / scale)
     # Analytic signals and phase difference
     analytic_gaps = hilbert(gaps)
     analytic_fringe = hilbert(zero_fringe)
