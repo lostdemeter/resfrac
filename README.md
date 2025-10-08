@@ -382,6 +382,16 @@ python -m resfrac.primes.cli --N 100000 --backend chudnovsky --holo
 python -m resfrac.visual.zetascope --N 100000 --zeros 256 --holo
 ```
 
+## Holographic Light-Cone Metaphor
+
+In holographic mode, solutions are treated as wavefronts reconstructed against a boundary set by the non-trivial zeros of ζ(s). The imaginary parts γ_k act as fiducial beacons defining a "causal" horizon in the critical strip:
+
+- **Zero fiducials** calibrate the solver’s phase parameter α by aligning gap signals (e.g., TSP edge lengths) to synthesized zero-fringe references.
+- **Coherence** is measured via a Hilbert-envelope and the circular variance of the phase difference between gaps and the zero-fringe. Low circular variance (≲ 0.1) indicates RH-stable, "causal" solutions.
+- **Invariant** combines log-dimension, boundary entropy of gaps, and a boundary-multiplicity proxy (skew-det permanent) to gate candidate moves; lower is sharper (better) holograms.
+
+ZetaScope visualizes this by overlaying a zero-reference phase track and coherence contours, making the light-cone alignment visible. Benchmarks show modest but consistent improvements when coherence gating and zero-calibrated phase tuning are enabled.
+
 ## Benchmarks
 
 Run the included benchmark script to compare fixed vs holographic mode:

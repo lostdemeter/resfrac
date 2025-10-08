@@ -6,7 +6,7 @@ from sympy import primerange, primepi, isprime, mobius
 from math import exp, log, pi, sqrt
 import time
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
-from resfrac.holo_utils import holo_bound, holographic_permanent, phase_retrieve
+from resfrac.holo_utils import holo_bound, holographic_permanent, phase_retrieve, get_zeta_fiducials, zero_calibrate
 def riemann_R(x, K=50):
     s = mpf(0)
     for n in range(1, K+1):
@@ -380,9 +380,14 @@ class ResonantSolver:
             n_clauses = len(getattr(g, 'clauses', []))
             inc = np.zeros((n_vars, n_clauses), dtype=float) if n_clauses > 0 else np.zeros((n_vars, 1), dtype=float)
             for c_idx, clause in enumerate(getattr(g, 'clauses', [])):
+                # Weight by clause satisfaction strength
+                sat_count = 0
                 for (var, neg) in clause:
-                    satisfied = bool(solution[var] ^ neg)  # True if this literal satisfies clause
-                    inc[var, c_idx] = 1.0 if satisfied else 0.0
+                    if bool(solution[var] ^ neg):
+                        sat_count += 1
+                weight = (sat_count / max(1, len(clause))) if len(clause) > 0 else 0.0
+                for (var, _neg) in clause:
+                    inc[var, c_idx] = weight
             # Project to variable-variable affinity (square) for determinant proxy
             adj = inc @ inc.T if inc.size > 0 else np.eye(max(1, n_vars))
             return adj
@@ -458,6 +463,20 @@ class ResonantSolver:
     # -----------------
     def phase_tune(self, g, initial_alpha: float = 0.05, max_tune_iters: int = 8):
         from scipy.optimize import minimize
+        # Bootstrap alpha via RH zero fiducials if in holo TSP mode
+        try:
+            if self.holo and getattr(g, 'type', 'tsp') == 'tsp' and hasattr(g, 'coords') and g.coords is not None:
+                dist_matrix = np.linalg.norm(g.coords[:, np.newaxis] - g.coords[np.newaxis, :], axis=2)
+                tour0 = self.phi_greedy(g, dist_matrix)
+                tour0_open = self.two_opt(tour0[:-1], dist_matrix)
+                tour0 = np.append(tour0_open, tour0_open[0])
+                gaps0 = self._get_gaps(tour0, g)
+                fid = get_zeta_fiducials(50)
+                alpha_shift, circ_var = zero_calibrate(gaps0, fid, tol=0.1)
+                if alpha_shift is not None:
+                    initial_alpha = float(np.clip(initial_alpha + alpha_shift, 0.05, 0.2))
+        except Exception:
+            pass
         bounds = [(0.05, 0.2)]
         def _loss(a_arr):
             a = float(a_arr[0])

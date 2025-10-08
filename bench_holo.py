@@ -10,6 +10,7 @@ import numpy as np
 
 from resfrac3 import ResonantSolver, SATGraph, load_dimacs
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
+from resfrac.holo_utils import get_zeta_fiducials, zero_calibrate
 
 
 class TSPGraph:
@@ -29,7 +30,16 @@ def run_tsp_trial(n: int, holo: bool, seed: int = None):
     tour, length, _ = solver.solve(g)
     bound = solver.invariant(g, tour)
     iters = max(0, len(solver.lengths) - 1)
-    return float(length), float(bound), int(iters)
+    circ_var = float('nan')
+    if holo:
+        try:
+            gaps = solver._get_gaps(tour, g)
+            fid = get_zeta_fiducials(50)
+            _, cv = zero_calibrate(gaps, fid, tol=0.1)
+            circ_var = float(cv)
+        except Exception:
+            pass
+    return float(length), float(bound), int(iters), float(circ_var)
 
 
 def run_sat_instance(path: str, holo: bool):
@@ -72,14 +82,16 @@ def main():
 
     print("== TSP ==")
     tsp_fixed_len, tsp_fixed_bound, tsp_fixed_iters = [], [], []
-    tsp_holo_len, tsp_holo_bound, tsp_holo_iters = [], [], []
+    tsp_holo_len, tsp_holo_bound, tsp_holo_iters, tsp_holo_circ = [], [], [], []
     for t in range(args.trials):
-        L, B, I = run_tsp_trial(args.tsp_n, holo=False, seed=1337 + t)
+        L, B, I, _ = run_tsp_trial(args.tsp_n, holo=False, seed=1337 + t)
         tsp_fixed_len.append(L); tsp_fixed_bound.append(B); tsp_fixed_iters.append(I)
-        Lh, Bh, Ih = run_tsp_trial(args.tsp_n, holo=True, seed=9001 + t)
-        tsp_holo_len.append(Lh); tsp_holo_bound.append(Bh); tsp_holo_iters.append(Ih)
+        Lh, Bh, Ih, CV = run_tsp_trial(args.tsp_n, holo=True, seed=9001 + t)
+        tsp_holo_len.append(Lh); tsp_holo_bound.append(Bh); tsp_holo_iters.append(Ih); tsp_holo_circ.append(CV)
     print("fixed: length", summarize(tsp_fixed_len), "holo_bound", summarize(tsp_fixed_bound), "iters", summarize(tsp_fixed_iters))
     print(" holo: length", summarize(tsp_holo_len), "holo_bound", summarize(tsp_holo_bound), "iters", summarize(tsp_holo_iters))
+    if len(tsp_holo_circ) > 0:
+        print("       circ_var", summarize([v for v in tsp_holo_circ if np.isfinite(v)]))
 
     print("\n== 3-SAT ==")
     unsat_f, bound_f, it_f = run_sat_instance(args.sat, holo=False)

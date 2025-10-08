@@ -18,12 +18,13 @@ import numpy as np
 from mpmath import zetazero
 from sympy import primerange, primepi
 from scipy.io.wavfile import write as wav_write
+from scipy.signal import hilbert
 
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button, CheckButtons, TextBox
 from matplotlib.animation import FuncAnimation
-from resfrac.holo_utils import phase_retrieve
+from resfrac.holo_utils import phase_retrieve, get_zeta_fiducials
 
 # Optional realtime playback
 try:
@@ -294,12 +295,34 @@ class ZetaScopeApp:
     def redraw(self):
         self.ax_mag.clear(); self.ax_iq.clear(); self.ax_iqc.clear(); self.ax_metrics.clear()
 
-        self.ax_mag.plot(self.n_vals, self.mag, color="#3366cc", lw=0.8, label="|S(n)|")
+        self.ax_mag.plot(self.n_vals, self.mag, color="#3366cc", lw=0.8, label="|S(n)|", zorder=3)
         if self.holo and self.env is not None:
             # Normalize envelope to comparable scale for overlay
             scale = max(1e-9, float(np.percentile(self.mag, 99.0)))
             env_norm = self.env / (np.max(self.env) + 1e-12) * scale
-            self.ax_mag.plot(self.n_vals, env_norm, color="#ff8800", lw=0.8, alpha=0.8, label="Hilbert envelope (holo)")
+            self.ax_mag.plot(self.n_vals, env_norm, color="#ff8800", lw=0.8, alpha=0.55, label="Hilbert envelope (holo)", zorder=2)
+            # Zero-reference phase overlay (scaled to magnitude axis)
+            try:
+                fid = get_zeta_fiducials(50)
+                # Build a simple zero fringe over n with log scaling for stability
+                maxn = float(self.n_vals[-1])
+                denom = np.log(max(3.0, maxn) + 1e-12)
+                # Downsample to avoid overdraw (≤ ~2000 points)
+                max_pts = 2000
+                step = max(1, len(self.n_vals) // max_pts)
+                n_ds = self.n_vals[::step].astype(float)
+                zero_fringe = np.zeros_like(n_ds, dtype=float)
+                for z in fid:
+                    zero_fringe += np.sin(z * n_ds / denom)
+                ph = np.angle(hilbert(zero_fringe))
+                # Map phase to a small band at the bottom (10-15% of scale)
+                band_base = 0.05 * scale
+                band_amp  = 0.10 * scale
+                ph_norm = (ph - ph.min()) / (np.ptp(ph) + 1e-12)
+                zr_y = band_base + band_amp * (ph_norm - 0.5)
+                self.ax_mag.plot(n_ds, zr_y, "--", lw=0.6, color="#44bb88", alpha=0.35, label="Zero Reference Phase", zorder=1)
+            except Exception:
+                pass
         self.ax_mag.vlines(self._true_primes, ymin=self.mag.min(), ymax=self.mag.max(), colors="#888888", alpha=0.06, linewidth=0.5)
         self.ax_mag.set_title(f"ZetaScope (static): N={self.cfg.N}, K={len(self.gammas)}, window={self.s_win.val:.2f}")
         self.ax_mag.set_xlabel("n"); self.ax_mag.set_ylabel("|S(n)|"); self.ax_mag.legend(loc="upper right", fontsize=9)
