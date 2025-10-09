@@ -11,19 +11,17 @@ This project explores **resonant fractional methods** for solving hard combinato
   - Traveling Salesman Problem (TSP) on Euclidean points.
   - 3-SAT instances (via local search with clause barycenter matching).
   - Prime enumeration (leveraging the zeta-sieve).
-
 The core idea draws from resonant invariants (e.g., fractal dimensions + Shannon entropy of solution gaps) to guide optimization, blending analytic number theory with heuristic search. Experiments show improved convergence on small-to-medium instances.
 
 Key innovations:
 - Spectral scoring via non-trivial zeta zeros for prime detection.
 - Hilbert-embedded QAM correction to denoise candidate scores.
 - Holographic mode: treat zeta sums as interference fringes, invariants as entropy-bounded surfaces, and solvers as wavefront reconstructions. Includes boundary encodings (Valiant-style), phase retrieval (Hilbert/QAM), and zero-fiducials for calibration.
-- φ-biased greedy tours with 2-opt refinement and dual flips for TSP/SAT.
+- Alternates φ-biased greedy tours with 2-opt refinement and dual flips for TSP/SAT.
 
 Tested on Python 3.12+; results reproducible with fixed seeds.
 
 ## For AI assistants
-
 - Start here: `AI_README.md` in the project root for a condensed quick-start.
 - Prefer the default `ChudnovskyBackend` for primes; `SRTOracleBackend` is for experimentation and is extremely slow on CPU.
 - Use `python -m resfrac.primes.cli --N 100000 --backend chudnovsky` to validate environment quickly.
@@ -196,6 +194,50 @@ print(f"Length evolution: {solver.lengths}")
 
 - Tour: Cyclic node order (starts/ends at 0).
 - Alternates φ-greedy + Borwein-weighted 2-opt + dual improvements.
+
+### 5. Holographic Sublinear Index (automated)
+
+A general-purpose, automated version of the holographic sublinear process. It builds a 1D fringe index from data using zeta zeros and random phases, then answers queries in O(log N + S) by sampling a small window around the fringe insertion point.
+
+Python usage:
+
+```python
+import numpy as np
+from resfrac import HolographicSublinearIndex
+
+# Data: X in R^{N x d}
+rng = np.random.default_rng(42)
+X = rng.normal(size=(50_000, 8))
+
+# Build index
+idx = HolographicSublinearIndex(K=256, seed=42).fit(X)
+print(idx.stats())  # fringe range + coherence metrics
+
+# Query
+q = rng.normal(size=(8,))
+cands, meta = idx.query(q, S=20, return_indices=False, gate=True)
+print("insertion loc", meta["loc"], "gated?", meta["gated"])
+
+# Optional: evaluate within candidates (e.g., local NN)
+def evaluate_nn(C, q):
+    d2 = np.sum((C - q) ** 2, axis=1)
+    return int(np.argmin(d2))
+
+best_local = idx.query(q, S=20, evaluate=evaluate_nn)[0]
+```
+
+CLI demo:
+
+```bash
+python -m resfrac.tools.holo_index_demo --N 50000 --d 8 --Q 200 --S 20 --K 256 --gate
+```
+
+Outputs fit/query timings and top-1 recall vs. exact brute-force neighbors.
+
+Notes:
+- `K` controls the number of zeta zeros used for the fringe. Higher K ≈ sharper locality but more compute.
+- `gate=True` adds a coherence check (phase variance + gap-entropy invariant). With `--gate-mode reject`, gated queries return no candidates.
+- For vector data, per-dimension random phases are used by default for ergodicity.
 
 ## Prime CLI (backend selection)
 
