@@ -54,6 +54,24 @@ JSON string (UTF-8 encoded, null-padded to 128 bytes):
 NumPy `.npy` format containing a 2D array:
 - **uint8**: Quantized hologram intensity [0, 255] (4x size reduction)
 - **float32**: Full precision hologram intensity [0, 1] (higher quality)
+- **QAM indices (complex mode)**: When `payload_format: "qam"`, the data is a 2D integer array of constellation indices encoding the complex field. The integer dtype is chosen by order:
+  - `uint8` for orders ≤ 256
+  - `uint16` for orders ≤ 65536
+  - `uint32` otherwise
+
+When QAM is enabled, the header includes:
+
+```json
+{
+  "mode": "complex",
+  "payload_format": "qam",
+  "qam_order": 256,      // perfect square (e.g., 16, 64, 256)
+  "qam_min": -1.0,       // lower bound of real/imag levels
+  "qam_max":  1.0        // upper bound of real/imag levels
+}
+```
+
+Demapping reconstructs the complex field by converting each index to its grid coordinate in a `√order × √order` square constellation spanning `[qam_min, qam_max]` along real and imaginary axes.
 
 The data represents the interference pattern:
 ```
@@ -182,6 +200,13 @@ python -m resfrac.tools.holo_file --benchmark
 # Custom parameters
 python -m resfrac.tools.holo_file --encode input.png --output test.holo \
     --kx 0.2 --ky 0.2 --no-quantize
+
+# Complex + QAM (compact complex field via indices)
+python -m resfrac.tools.holo_file --encode input.png --output complex_qam.holo \
+    --mode complex --qam-order 256
+
+# Benchmark complex QAM
+python -m resfrac.tools.holo_file --benchmark --mode complex --qam-order 256
 ```
 
 ### Python API

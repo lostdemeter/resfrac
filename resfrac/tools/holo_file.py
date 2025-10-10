@@ -22,6 +22,7 @@ import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 # Fixed-size JSON header length (bytes)
 HEADER_SIZE = 512
@@ -30,7 +31,8 @@ HEADER_SIZE = 512
 # ========== Core Encode/Decode Functions ==========
 
 def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True, phase: bool = False,
-                mode: str = "offaxis1"):
+                mode: str = "offaxis1", qam_order: int = 0, qam_range_min: Optional[float] = None,
+                qam_range_max: Optional[float] = None):
     """
     Encode a B&W image to .holo file using off-axis holography.
     
@@ -110,15 +112,60 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
 
     elif mode == "complex":
         # Store complex object field directly: O = sqrt(image) * exp(i*0)
-        # Lossless with float32 components (real, imag)
-        re = np.real(O).astype(np.float32)
-        im = np.imag(O).astype(np.float32)
-        payload = np.stack([re, im], axis=0)  # (2, H, W)
-        bit_depth = 32
-        quantize = False  # force float storage
-        header_mode = "complex"
-        extra = {"channels": 2}
-        scale_factor = 1.0
+        # Optional: QAM modulation to compact indices
+
+        def _select_dtype_and_bits(order: int):
+            if order <= 256:
+                return np.uint8, 8
+            elif order <= 65536:
+                return np.uint16, 16
+            else:
+                return np.uint32, 32
+
+        def _qam_levels(order: int, rmin: float, rmax: float):
+            L = int(np.sqrt(order))
+            if L * L != order or L < 2:
+                raise ValueError("qam_order must be a perfect square >= 4 (e.g., 16, 64, 256)")
+            levels = np.linspace(rmin, rmax, L, dtype=np.float32)
+            step = levels[1] - levels[0]
+            return L, levels, step
+
+        def _qam_quantize_indices(field_c: np.ndarray, L: int, rmin: float, step: float):
+            # Vectorized nearest level rounding on square grid
+            re = field_c.real
+            im = field_c.imag
+            i_r = np.rint((re - rmin) / (step + 1e-12)).astype(np.int64)
+            i_i = np.rint((im - rmin) / (step + 1e-12)).astype(np.int64)
+            i_r = np.clip(i_r, 0, L - 1)
+            i_i = np.clip(i_i, 0, L - 1)
+            return (i_r * L + i_i).astype(np.int64)
+
+        if qam_order and qam_order > 0:
+            # Auto range if not specified: symmetric about 0 to cover field extrema
+            re_min, re_max = float(np.min(O.real)), float(np.max(O.real))
+            im_min, im_max = float(np.min(O.imag)), float(np.max(O.imag))
+            # Use symmetric range to include negative/positive lobes if present
+            m = max(abs(re_min), abs(re_max), abs(im_min), abs(im_max), 1e-6)
+            rmin = qam_range_min if qam_range_min is not None else -m
+            rmax = qam_range_max if qam_range_max is not None else m
+            L, levels, step = _qam_levels(qam_order, rmin, rmax)
+            idx = _qam_quantize_indices(O, L, rmin, step)
+            dtype, bit_depth = _select_dtype_and_bits(qam_order)
+            payload = idx.astype(dtype)  # (H, W) integer indices
+            quantize = False  # handled by QAM indices
+            header_mode = "complex"
+            extra = {"qam_order": int(qam_order), "qam_min": float(rmin), "qam_max": float(rmax)}
+            scale_factor = 1.0
+        else:
+            # Lossless with float32 components (real, imag)
+            re = np.real(O).astype(np.float32)
+            im = np.imag(O).astype(np.float32)
+            payload = np.stack([re, im], axis=0)  # (2, H, W)
+            bit_depth = 32
+            quantize = False  # force float storage
+            header_mode = "complex"
+            extra = {"channels": 2}
+            scale_factor = 1.0
     else:
         raise ValueError("mode must be one of {'offaxis1','ps4','complex'}")
 
@@ -156,6 +203,9 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
     if mode == "offaxis1" and quantize and 'compression' not in header:
         header["compression"] = compression or None  # "png"
         header["payload_format"] = "png"
+    # Mark QAM payload format for complex mode when indices are stored
+    if mode == "complex" and isinstance(payload, np.ndarray) and payload.ndim == 2 and extra.get("qam_order", 0):
+        header["payload_format"] = "qam"  # integer indices
     header_str = json.dumps(header)
     header_bytes = header_str.encode('utf-8')
     if len(header_bytes) > HEADER_SIZE:
@@ -235,15 +285,20 @@ def decode_holo(input_file, phase_retrieval: bool = False):
     header_checksum = str(header.get('checksum', '')).lower()
     scale = float(header.get('scale', 4.0))
     
-    # Dequantize if uint8
-    if bit_depth == 8:
-        # If loaded from PNG, holo already in [0,1]
-        if header.get('payload_format', 'npy') != 'png':
-            holo = holo.astype(np.float32) / 255.0
-    elif bit_depth == 32:
-        holo = holo.astype(np.float32)
+    # Dequantize for intensity-based payloads; QAM indices are handled later
+    payload_format = header.get('payload_format', 'npy')
+    if payload_format == 'qam':
+        # Keep integer indices as-is
+        pass
     else:
-        raise ValueError(f"Unsupported bit_depth: {bit_depth}")
+        if bit_depth == 8:
+            # If loaded from PNG, holo already in [0,1]
+            if header.get('payload_format', 'npy') != 'png':
+                holo = holo.astype(np.float32) / 255.0
+        elif bit_depth == 32:
+            holo = holo.astype(np.float32)
+        else:
+            raise ValueError(f"Unsupported bit_depth: {bit_depth}")
 
     # Verify checksum if present
     if header_checksum:
@@ -283,11 +338,30 @@ def decode_holo(input_file, phase_retrieval: bool = False):
         recon = np.abs(C) ** 2
 
     elif mode == "complex":
-        # Complex field stored as (2, H, W): [real, imag]
-        if holo.shape[0] != 2:
-            raise ValueError("complex data must have shape (2, H, W)")
-        O = holo[0] + 1j * holo[1]
-        recon = np.abs(O) ** 2
+        if payload_format == 'qam':
+            # Demap QAM indices back to complex field
+            order = int(header.get('qam_order', 0))
+            if order <= 0:
+                raise ValueError("QAM payload missing 'qam_order' in header")
+            L = int(np.sqrt(order))
+            if L * L != order:
+                raise ValueError("Invalid qam_order in header (not a perfect square)")
+            rmin = float(header.get('qam_min', -1.0))
+            rmax = float(header.get('qam_max', 1.0))
+            step = (rmax - rmin) / (L - 1) if L > 1 else 0.0
+            idx = holo.astype(np.int64)
+            i_r = idx // L
+            i_i = idx % L
+            re = (rmin + i_r * step).astype(np.float32)
+            im = (rmin + i_i * step).astype(np.float32)
+            O = re + 1j * im
+            recon = np.abs(O) ** 2
+        else:
+            # Complex field stored as (2, H, W): [real, imag]
+            if holo.shape[0] != 2:
+                raise ValueError("complex data must have shape (2, H, W)")
+            O = holo[0] + 1j * holo[1]
+            recon = np.abs(O) ** 2
     else:
         raise ValueError("Unknown mode in file header")
     # Normalize to [0,1] for display
@@ -338,7 +412,7 @@ def save_image(path, img):
 
 # ========== Benchmarking ==========
 
-def benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, phase=False, quantize=True, kx=0.3, ky=0.3, mode: str = "offaxis1"):
+def benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, phase=False, quantize=True, kx=0.3, ky=0.3, mode: str = "offaxis1", qam_order: int = 0):
     """
     Benchmark .holo format vs PNG baseline.
     
@@ -364,7 +438,7 @@ def benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, phase=False,
     """
     # === Holographic encoding/decoding ===
     start = time.time()
-    holo = encode_holo(img, holo_file, quantize=quantize, phase=phase, kx=kx, ky=ky, mode=mode)
+    holo = encode_holo(img, holo_file, quantize=quantize, phase=phase, kx=kx, ky=ky, mode=mode, qam_order=qam_order)
     encode_time = time.time() - start
     holo_size = Path(holo_file).stat().st_size
     
@@ -401,7 +475,7 @@ def benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, phase=False,
     }
     
     if verbose:
-        mode_str = f"{mode}, {'float32' if not quantize else 'uint8'}{', phase' if phase else ''}"
+        mode_str = f"{mode}, {'float32' if not quantize else 'uint8'}{', phase' if phase else ''}{f', QAM{qam_order}' if (mode=='complex' and qam_order) else ''}"
         print("=" * 60)
         print("HOLOGRAPHIC FILE FORMAT BENCHMARK")
         print("=" * 60)
@@ -528,6 +602,13 @@ Examples:
                        help="Enable lightweight phase retrieval (encode: pre-process; decode: 5-iter GS)")
     parser.add_argument("--float", action="store_true",
                        help="Alias for --no-quantize (store float32 hologram)")
+    # QAM options (complex mode)
+    parser.add_argument("--qam-order", type=int, default=0,
+                       help="Enable QAM modulation for complex mode with given order (perfect square like 16, 64, 256). 0 disables QAM.")
+    parser.add_argument("--qam-range-min", type=float, default=None,
+                       help="Optional lower bound for QAM grid levels. Default auto: symmetric about 0 from data range.")
+    parser.add_argument("--qam-range-max", type=float, default=None,
+                       help="Optional upper bound for QAM grid levels. Default auto: symmetric about 0 from data range.")
     
     # Benchmark options
     parser.add_argument("--size", type=int, default=256,
@@ -546,7 +627,8 @@ Examples:
         start = time.time()
         quantize = not (args.no_quantize or args.float)
         encode_holo(img, output_file, kx=args.kx, ky=args.ky,
-                    quantize=quantize, phase=args.phase, mode=args.mode)
+                    quantize=quantize, phase=args.phase, mode=args.mode,
+                    qam_order=args.qam_order, qam_range_min=args.qam_range_min, qam_range_max=args.qam_range_max)
         elapsed = time.time() - start
         size = Path(output_file).stat().st_size
         print(f"✓ Encoded in {elapsed:.4f}s, size: {size} bytes ({size/img.size:.3f} B/pixel)")
@@ -574,7 +656,7 @@ Examples:
         quantize = not (args.no_quantize or args.float)
         results = benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, 
                                        phase=args.phase, quantize=quantize,
-                                       kx=args.kx, ky=args.ky, mode=args.mode)
+                                       kx=args.kx, ky=args.ky, mode=args.mode, qam_order=args.qam_order)
         
         # Optionally save visualization
         print("\nGenerating visualization...")
