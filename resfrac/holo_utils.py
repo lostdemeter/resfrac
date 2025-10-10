@@ -48,6 +48,47 @@ def phase_retrieve(signal_1d):  # Extend QAM: Hilbert envelope for fringe cohere
     return env, float(np.var(phase))
 
 
+def align_phase(object_signal, reference_signal):
+    """Polarization/phase alignment between object and reference signals.
+
+    Computes analytic signals via Hilbert transform, estimates the mean phase
+    offset between object and reference, and returns the rotation angle along
+    with the phase-aligned real object signal.
+
+    Parameters
+    ----------
+    object_signal : array-like
+        Real-valued 1D signal representing the noisy/object path.
+    reference_signal : array-like
+        Real-valued 1D signal representing the clean/reference path.
+
+    Returns
+    -------
+    theta : float
+        Estimated phase rotation (radians) to align object with reference.
+    aligned : np.ndarray
+        Real-valued phase-aligned version of the object signal.
+    """
+    x = np.asarray(object_signal, dtype=float).ravel()
+    r = np.asarray(reference_signal, dtype=float).ravel()
+    n = min(x.size, r.size)
+    if n == 0:
+        return 0.0, x
+    x = x[:n]
+    r = r[:n]
+    # Analytic signals
+    ax = hilbert(x)
+    ar = hilbert(r)
+    ph_x = np.angle(ax)
+    ph_r = np.angle(ar)
+    d = ph_x - ph_r
+    # Estimate mean phase difference on unit circle
+    theta = float(np.angle(np.mean(np.exp(1j * d))))
+    aligned_complex = ax * np.exp(-1j * theta)
+    aligned = np.real(aligned_complex)
+    return theta, aligned
+
+
 def holo_bound(log_dim, H_boundary, adj=None, rh_constraint: bool = False):
     """Invariant as entropy surface: dim + disorder/φ - log(perm) [+ optional RH penalty].
 
@@ -158,3 +199,52 @@ def zero_calibrate(gaps: np.ndarray, fiducials: np.ndarray, tol: float = 0.1,
             best_val = float(cv)
             best_s = float(s)
     return best_s, float(circ_var)
+
+
+# ------------------------------
+# Fresnel diffraction (FFT-based, 2D)
+# ------------------------------
+
+def fresnel_propagate2d(field: np.ndarray, z: float = 1.0, lambda_w: float = 1.0,
+                        dx: float = 1.0, dy: float = 1.0) -> np.ndarray:
+    """Propagate a 2D scalar field to distance z using Fresnel approximation.
+
+    Parameters
+    ----------
+    field : np.ndarray
+        Real-valued 2D aperture field u(x, y, 0).
+    z : float
+        Propagation distance.
+    lambda_w : float
+        Wavelength.
+    dx, dy : float
+        Sample spacing in x and y.
+
+    Returns
+    -------
+    np.ndarray
+        Propagated intensity |u(x, y, z)|^2.
+    """
+    f0 = np.asarray(field, dtype=float)
+    if f0.ndim != 2 or f0.size == 0:
+        return np.abs(f0)**2
+    ny, nx = f0.shape
+    k = 2 * np.pi / max(lambda_w, 1e-12)
+    # Quadratic phase factors (paraxial approx)
+    x = (np.arange(nx) - nx // 2) * dx
+    y = (np.arange(ny) - ny // 2) * dy
+    X, Y = np.meshgrid(x, y)
+    Q1 = np.exp(1j * (k / (2 * max(z, 1e-12))) * (X**2 + Y**2))
+    U0 = f0 * Q1
+    U0_f = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(U0)))
+    # Transfer kernel in frequency domain (Fresnel)
+    fx = np.fft.fftfreq(nx, d=dx)
+    fy = np.fft.fftfreq(ny, d=dy)
+    FX, FY = np.meshgrid(fx, fy)
+    H = np.exp(-1j * np.pi * lambda_w * max(z, 1e-12) * (FX**2 + FY**2))
+    Uz_f = U0_f * H
+    uz = np.fft.fftshift(np.fft.ifft2(np.fft.ifftshift(Uz_f)))
+    # Output quadratic phase factor
+    Q2 = np.exp(1j * (k / (2 * max(z, 1e-12))) * (X**2 + Y**2))
+    uz = uz * Q2
+    return np.abs(uz) ** 2

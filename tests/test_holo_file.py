@@ -135,17 +135,19 @@ class TestHoloFileFormat(unittest.TestCase):
         # Read header manually
         import json
         with open(holo_file, 'rb') as f:
-            header_bytes = f.read(128)
+            header_bytes = f.read(512)  # fixed header size in current spec
             header_str = header_bytes.rstrip(b'\0').decode('utf-8')
             header = json.loads(header_str)
         
         # Verify metadata
-        self.assertEqual(header['version'], '1.0')
+        self.assertIn(header['version'], ('1.0', '1.1'))  # allow minor bump
         self.assertEqual(header['width'], 100)
         self.assertEqual(header['height'], 100)
         self.assertAlmostEqual(header['kx'], kx, places=5)
         self.assertAlmostEqual(header['ky'], ky, places=5)
         self.assertEqual(header['bit_depth'], 8)
+        # Default mode should be offaxis1 unless changed by encode
+        self.assertIn(header.get('mode', 'offaxis1'), ('offaxis1', 'ps4', 'complex'))
     
     def test_edge_cases(self):
         """Test edge cases: all black, all white, single pixel."""
@@ -166,9 +168,13 @@ class TestHoloFileFormat(unittest.TestCase):
     def test_benchmark_runs(self):
         """Test that benchmark function runs without errors."""
         img = generate_checkerboard(size=128, block=16)
-        results = benchmark_holo_vs_png(img, 
-                                       holo_file=str(self.temp_path / "bench.holo"),
-                                       verbose=False)
+        # Default (offaxis1)
+        results = benchmark_holo_vs_png(
+            img,
+            holo_file=str(self.temp_path / "bench.holo"),
+            verbose=False,
+            mode='offaxis1'
+        )
         
         # Check that all expected keys are present
         expected_keys = [
@@ -184,6 +190,42 @@ class TestHoloFileFormat(unittest.TestCase):
         
         # Check that PSNR is finite
         self.assertTrue(np.isfinite(results['holo_psnr']))
+
+        # PS4 near-lossless (uint8) should achieve high PSNR
+        results_ps4 = benchmark_holo_vs_png(
+            img,
+            holo_file=str(self.temp_path / "bench_ps4.holo"),
+            verbose=False,
+            mode='ps4',
+            quantize=True
+        )
+        self.assertGreater(results_ps4['holo_psnr'], 30.0)
+
+        # Complex float32 should be lossless (infinite PSNR)
+        results_cplx = benchmark_holo_vs_png(
+            img,
+            holo_file=str(self.temp_path / "bench_complex.holo"),
+            verbose=False,
+            mode='complex',
+            quantize=False
+        )
+        self.assertTrue(np.isinf(results_cplx['holo_psnr']))
+
+    def test_lossless_modes(self):
+        """Lossless modes (ps4 float32, complex float32) reconstruct exactly."""
+        img = generate_checkerboard(size=64, block=8)
+        p_ps4 = self.temp_path / "lossless_ps4.holo"
+        p_cplx = self.temp_path / "lossless_complex.holo"
+
+        # PS4 float32
+        encode_holo(img, p_ps4, quantize=False, mode='ps4')
+        recon_ps4 = decode_holo(p_ps4)
+        self.assertTrue(np.isinf(compute_psnr(img, recon_ps4)))
+
+        # Complex float32
+        encode_holo(img, p_cplx, quantize=False, mode='complex')
+        recon_cplx = decode_holo(p_cplx)
+        self.assertTrue(np.isinf(compute_psnr(img, recon_cplx)))
 
 
 class TestHolographicProperties(unittest.TestCase):

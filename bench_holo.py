@@ -7,11 +7,18 @@ import argparse
 import time
 import statistics as stats
 import numpy as np
+import mpmath as mp
 
 from resfrac3 import ResonantSolver, SATGraph, load_dimacs
 from resfrac.primes.chudnovsky_backend import ChudnovskyBackend
 from resfrac.holo_utils import get_zeta_fiducials, zero_calibrate
 from resfrac import HolographicSublinearIndex
+from resfrac.tools.zeta_fiducial import (
+    zeta_points,
+    zeta_fringe_cartographer,
+    zeta_sfft,
+    tune_walltime,
+)
 
 
 class TSPGraph:
@@ -20,18 +27,19 @@ class TSPGraph:
         self.coords = np.array(coords, dtype=float)
 
 
-def run_tsp_trial(n: int, holo: bool, seed: int = None, rh_constraint: bool = False, calib_weighting: str = 'none'):
+def run_tsp_trial(n: int, holo: bool, seed: int = None, rh_constraint: bool = False, calib_weighting: str = 'none', propagate: str = 'none'):
     if seed is not None:
         rng = np.random.default_rng(seed)
     else:
         rng = np.random.default_rng()
     coords = rng.random((n, 2))
     g = TSPGraph(coords)
-    solver = ResonantSolver(max_iters=50, holo=holo, rh_constraint=rh_constraint, calib_weighting=calib_weighting)
+    solver = ResonantSolver(max_iters=50, holo=holo, rh_constraint=rh_constraint, calib_weighting=calib_weighting, propagate=str(propagate))
     tour, length, _ = solver.solve(g)
     bound = solver.invariant(g, tour)
     iters = max(0, len(solver.lengths) - 1)
     circ_var = float('nan')
+    stillness = float('nan')
     if holo:
         try:
             gaps = solver._get_gaps(tour, g)
@@ -40,7 +48,14 @@ def run_tsp_trial(n: int, holo: bool, seed: int = None, rh_constraint: bool = Fa
             circ_var = float(cv)
         except Exception:
             pass
-    return float(length), float(bound), int(iters), float(circ_var)
+        try:
+            # Stillness: mean absolute delta of successive objective values
+            if len(solver.lengths) > 1:
+                diffs = np.abs(np.diff(np.asarray(solver.lengths, dtype=float)))
+                stillness = float(np.mean(diffs))
+        except Exception:
+            pass
+    return float(length), float(bound), int(iters), float(circ_var), float(stillness)
 
 
 def run_sat_instance(path: str, holo: bool):
@@ -52,8 +67,8 @@ def run_sat_instance(path: str, holo: bool):
     return int(unsat), float(bound), int(iters)
 
 
-def run_primes(N: int, holo: bool):
-    backend = ChudnovskyBackend(holo=holo)
+def run_primes(N: int, holo: bool, phase_retrieval: str = "hilbert"):
+    backend = ChudnovskyBackend(holo=holo, phase_retrieval=str(phase_retrieval))
     t0 = time.time()
     primes = backend.primes_up_to(int(N))
     dt = time.time() - t0
@@ -161,6 +176,14 @@ def main():
     p.add_argument("--primeN", type=int, default=100_000, help="Upper bound for prime sieve")
     p.add_argument("--rh-constraint", action="store_true", help="Enable RH-style penalty in holo_bound (TSP only)")
     p.add_argument("--calib-weighting", type=str, default="none", choices=["none", "inv_gamma", "pair_corr"], help="Weighting for zero_calibrate fringe synthesis")
+    p.add_argument("--precision", type=int, default=0, help="mpmath decimal precision (dps); 0 keeps defaults")
+    p.add_argument("--prop", type=str, default="none", choices=["none", "angular"], help="Holographic propagation backend for TSP/SAT")
+    p.add_argument("--phase-retrieval", type=str, default="hilbert", choices=["hilbert", "gs"], help="Prime sieve phase retrieval method")
+    # Zeta-fiducial options
+    p.add_argument("--zeta", action="store_true", help="Run Zeta-Fiducial hologram bench")
+    p.add_argument("--zeta-K", type=int, default=50, help="Number of zeta zeros")
+    p.add_argument("--zeta-grid", type=int, default=256, help="Grid size for zeta hologram")
+    p.add_argument("--zeta-crop", type=int, default=32, help="SFFT crop size for zeta bench")
     # HoloIndex options
     p.add_argument("--holoindex", action="store_true", help="Run Holographic Sublinear Index bench")
     p.add_argument("--hi-N", type=int, default=50_000, help="HoloIndex dataset size")
@@ -171,19 +194,27 @@ def main():
     p.add_argument("--hi-metric", type=str, default="euclidean", choices=["euclidean", "cosine"], help="HoloIndex metric")
     args = p.parse_args()
 
+    if int(args.precision) > 0:
+        try:
+            mp.dps = int(args.precision)
+        except Exception:
+            pass
+
     print("== TSP ==")
     print(f"options: rh_constraint={args.rh_constraint}, calib_weighting={args.calib_weighting}")
     tsp_fixed_len, tsp_fixed_bound, tsp_fixed_iters = [], [], []
-    tsp_holo_len, tsp_holo_bound, tsp_holo_iters, tsp_holo_circ = [], [], [], []
+    tsp_holo_len, tsp_holo_bound, tsp_holo_iters, tsp_holo_circ, tsp_holo_still = [], [], [], [], []
     for t in range(args.trials):
-        L, B, I, _ = run_tsp_trial(args.tsp_n, holo=False, seed=1337 + t, rh_constraint=args.rh_constraint, calib_weighting=args.calib_weighting)
+        L, B, I, _, _ = run_tsp_trial(args.tsp_n, holo=False, seed=1337 + t, rh_constraint=args.rh_constraint, calib_weighting=args.calib_weighting, propagate=args.prop)
         tsp_fixed_len.append(L); tsp_fixed_bound.append(B); tsp_fixed_iters.append(I)
-        Lh, Bh, Ih, CV = run_tsp_trial(args.tsp_n, holo=True, seed=9001 + t, rh_constraint=args.rh_constraint, calib_weighting=args.calib_weighting)
-        tsp_holo_len.append(Lh); tsp_holo_bound.append(Bh); tsp_holo_iters.append(Ih); tsp_holo_circ.append(CV)
+        Lh, Bh, Ih, CV, ST = run_tsp_trial(args.tsp_n, holo=True, seed=9001 + t, rh_constraint=args.rh_constraint, calib_weighting=args.calib_weighting, propagate=args.prop)
+        tsp_holo_len.append(Lh); tsp_holo_bound.append(Bh); tsp_holo_iters.append(Ih); tsp_holo_circ.append(CV); tsp_holo_still.append(ST)
     print("fixed: length", summarize(tsp_fixed_len), "holo_bound", summarize(tsp_fixed_bound), "iters", summarize(tsp_fixed_iters))
     print(" holo: length", summarize(tsp_holo_len), "holo_bound", summarize(tsp_holo_bound), "iters", summarize(tsp_holo_iters))
     if len(tsp_holo_circ) > 0:
         print("       circ_var", summarize([v for v in tsp_holo_circ if np.isfinite(v)]))
+    if len(tsp_holo_still) > 0:
+        print("       stillness", summarize([v for v in tsp_holo_still if np.isfinite(v)]))
 
     print("\n== 3-SAT ==")
     unsat_f, bound_f, it_f = run_sat_instance(args.sat, holo=False)
@@ -192,11 +223,27 @@ def main():
     print(f" holo: unsat {unsat_h}, holo_bound {bound_h:.3f}, iters {it_h}")
 
     print("\n== Primes ==")
-    cnt_f, exp_pi, dt_f = run_primes(args.primeN, holo=False)
-    cnt_h, _, dt_h = run_primes(args.primeN, holo=True)
+    cnt_f, exp_pi, dt_f = run_primes(args.primeN, holo=False, phase_retrieval=args.phase_retrieval)
+    cnt_h, _, dt_h = run_primes(args.primeN, holo=True, phase_retrieval=args.phase_retrieval)
     pi_text = f" (expected pi(N)={exp_pi})" if exp_pi is not None else ""
     print(f"fixed: count {cnt_f}{pi_text}, time {dt_f:.3f}s")
     print(f" holo: count {cnt_h}{pi_text}, time {dt_h:.3f}s")
+
+    if args.zeta:
+        print("\n== Zeta-Fiducial ==")
+        # quick tuner for (carrier, sigma)
+        best = tune_walltime(K=args.zeta_K, grid=args.zeta_grid, crop=args.zeta_crop)
+        K = args.zeta_K
+        grid = args.zeta_grid
+        carrier = float(best.get("carrier", 0.15))
+        sigma = float(best.get("sigma", 0.05))
+        pts = zeta_points(K)
+        t0 = time.time()
+        H = zeta_fringe_cartographer(pts, grid=grid, carrier=carrier, sigma=sigma)
+        recon, st = zeta_sfft(H, carrier=carrier, crop=args.zeta_crop)
+        dt = time.time() - t0
+        print(f"K={K}, grid={grid}, carrier={carrier:.3f}, sigma={sigma:.3f}, crop={args.zeta_crop}")
+        print(f"time {dt:.4f}s | recon max {st['max_intensity']:.2f} | crop {st['crop_w']}x{st['crop_h']}")
 
     if args.holoindex:
         print("\n== HoloIndex ==")

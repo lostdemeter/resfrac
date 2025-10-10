@@ -5,7 +5,7 @@ from mpmath import im, li, mpf
 from sympy import primerange, isprime, mobius, primepi
 from math import exp, log, sqrt, ceil
 import mpmath as mp
-from resfrac.holo_utils import phase_retrieve
+from resfrac.holo_utils import phase_retrieve, align_phase
 mp.dps = 20
 
 def riemann_R(x, K=50):
@@ -51,7 +51,50 @@ def compute_spectral_scores(candidates, gammas, h):
     scores = (psi_plus - psi_minus) / (2 * h * np.array(candidates) * logn_arr)
     return scores
 
-def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2, holo: bool = False):
+def _gs_1d(intensity_meas: np.ndarray, target_amp: np.ndarray, n_iter: int = 30, tol: float = 1e-4) -> np.ndarray:
+    """Gerchberg–Saxton for 1D signals using FFT.
+
+    Parameters
+    ----------
+    intensity_meas : np.ndarray
+        Measured Fourier-domain magnitudes (|F{u}|).
+    target_amp : np.ndarray
+        Desired time-domain amplitude constraint |u|.
+    n_iter : int
+        Maximum iterations.
+    tol : float
+        MSE tolerance on Fourier magnitude convergence.
+
+    Returns
+    -------
+    np.ndarray
+        Complex refined field u.
+    """
+    intensity_meas = np.asarray(intensity_meas, dtype=float).ravel()
+    target_amp = np.asarray(target_amp, dtype=float).ravel()
+    n = min(intensity_meas.size, target_amp.size)
+    if n == 0:
+        return target_amp.astype(complex)
+    I = intensity_meas[:n]
+    A = target_amp[:n]
+    # initialize with random phase on target amplitude
+    rng = np.random.default_rng(0)
+    u = A * np.exp(1j * rng.uniform(0, 2 * np.pi, size=n))
+    for _ in range(max(1, int(n_iter))):
+        U = np.fft.fft(u)
+        # enforce Fourier magnitude
+        Up = I * np.exp(1j * np.angle(U))
+        up = np.fft.ifft(Up)
+        # enforce time-domain amplitude
+        u_new = A * np.exp(1j * np.angle(up))
+        # convergence check
+        if np.mean((np.abs(np.fft.fft(u_new)) - I) ** 2) < float(tol):
+            u = u_new
+            break
+        u = u_new
+    return u
+
+def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2, holo: bool = False, phase_retrieval: str = "hilbert"):
     gammas = get_gammas_dynamic(T)
     B = int(sqrt(N)) + 1
     mid = N / 2
@@ -62,11 +105,33 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2, holo: bool = False):
     scores = compute_spectral_scores(candidates, gammas, h)
     if holo:
         try:
-            env, phase_var = phase_retrieve(np.asarray(scores, dtype=float))
-            env_norm = env / (np.max(env) + 1e-12)
-            scores = scores * env_norm
-            if phase_var > 0.1:
-                scores *= 0.8
+            # Object/Reference split: object = spectral scores; reference = smooth baseline ~ 1/log n
+            obj = np.asarray(scores, dtype=float)
+            ref = 1.0 / (np.log(np.asarray(candidates, dtype=float) + 1e-12) + 1e-12)
+            # Phase/polarization alignment
+            _theta, obj_aligned = align_phase(obj, ref)
+            if str(phase_retrieval).lower() == "gs":
+                # Fourier magnitude from object; time-domain amp from reference
+                intensity_meas = np.abs(np.fft.fft(obj_aligned))
+                target_amp = ref / (np.max(ref) + 1e-12)
+                u_refined = _gs_1d(intensity_meas, target_amp, n_iter=30, tol=1e-4)
+                refined_real = np.real(u_refined)
+                env, phase_var = phase_retrieve(refined_real)
+                env_norm = env / (np.max(env) + 1e-12)
+                ref_norm = target_amp  # already normalized
+                scores = 0.6 * refined_real * env_norm + 0.4 * ref_norm
+                if phase_var > 0.12:
+                    scores *= 0.85
+            else:
+                # Hilbert envelope path (default)
+                env, phase_var = phase_retrieve(obj_aligned)
+                env_norm = env / (np.max(env) + 1e-12)
+                # Blend aligned object with normalized reference as a clean baseline
+                ref_norm = ref / (np.max(ref) + 1e-12)
+                scores = 0.6 * obj_aligned * env_norm + 0.4 * ref_norm
+                # Stability gate under high phase variance
+                if phase_var > 0.12:
+                    scores *= 0.85
         except Exception:
             pass
     top_idx = np.argsort(-scores)[:M]

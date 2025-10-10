@@ -63,6 +63,7 @@ def main():
     ap.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"], help="Computation dtype for index (affects speed)")
     ap.add_argument("--chunk-k", type=int, default=64, help="K-chunk size for vectorized encoding (0 disables chunking)")
     ap.add_argument("--seed", type=int, default=42, help="RNG seed")
+    ap.add_argument("--prop", type=str, default="none", choices=["none", "fresnel"], help="Coherence propagation backend inside gating")
     ap.add_argument("--gate", action="store_true", help="Enable coherence gating")
     ap.add_argument("--gate-mode", type=str, default="flag", choices=["flag", "reject"], help="Gating behavior: flag or reject results when coherence drops")
     ap.add_argument("--gate-tol", type=float, default=0.15, help="Manual gating tolerance when auto gating is disabled")
@@ -96,6 +97,7 @@ def main():
             gate_quantile=float(args.gate_quantile),
             dtype=str(args.dtype),
             chunk_k=int(args.chunk_k),
+            prop=str(args.prop),
         ).fit(Xn)
         indices.append(idx)
     t_fit = time.time() - t0

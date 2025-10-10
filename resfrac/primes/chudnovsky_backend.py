@@ -5,11 +5,12 @@ from .backends import PrimeBackend
 from ..sieves.zeta_chudnovsky import chudnovsky_like_sieve
 
 class ChudnovskyBackend(PrimeBackend):
-    def __init__(self, holo: bool = False):
+    def __init__(self, holo: bool = False, phase_retrieval: str = "hilbert"):
         self.holo = bool(holo)
+        self.phase_retrieval = str(phase_retrieval)
 
     def primes_up_to(self, N: int) -> List[int]:
-        return chudnovsky_like_sieve(N, holo=self.holo)
+        return chudnovsky_like_sieve(N, holo=self.holo, phase_retrieval=self.phase_retrieval)
 
     def is_probable_prime(self, n: int) -> bool:
         # sympy.isprime is fine for big-int checks in tooling; for RSA, we’ll inject our own MR below.

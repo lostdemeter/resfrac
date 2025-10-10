@@ -10,6 +10,13 @@ from .holo_file import (
     save_image,
 )
 
+from .zeta_fiducial import (
+    zeta_points,
+    zeta_fringe_cartographer,
+    zeta_sfft,
+    tune_walltime,
+)
+
 __all__ = [
     'encode_holo',
     'decode_holo',
@@ -18,4 +25,8 @@ __all__ = [
     'benchmark_holo_vs_png',
     'load_image_as_bw',
     'save_image',
+    'zeta_points',
+    'zeta_fringe_cartographer',
+    'zeta_sfft',
+    'tune_walltime',
 ]

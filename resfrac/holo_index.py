@@ -23,7 +23,7 @@ from typing import Callable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from .holo_utils import get_zeta_fiducials, phase_retrieve, log_phi
+from .holo_utils import get_zeta_fiducials, phase_retrieve, log_phi, fresnel_propagate2d
 
 # Simple in-process cache for zeta zeros to avoid repeated costly computation
 _GAMMA_CACHE: dict[int, np.ndarray] = {}
@@ -75,6 +75,7 @@ class HolographicSublinearIndex:
         gate_quantile: float = 0.85,
         dtype: str = "float32",
         chunk_k: int = 0,
+        prop: str = "none",
     ):
         self.K = int(K)
         self.seed = None if seed is None else int(seed)
@@ -84,6 +85,7 @@ class HolographicSublinearIndex:
         self.gate_quantile = float(gate_quantile)
         self._dtype = np.float32 if str(dtype).lower() == 'float32' else np.float64
         self._chunk_k = max(0, int(chunk_k))
+        self._prop = str(prop).lower()
 
         self._rng = np.random.default_rng(self.seed)
         self._gammas = _get_gammas_cached(self.K, dtype='float32' if self._dtype==np.float32 else 'float64')  # shape (K,)
@@ -223,6 +225,24 @@ class HolographicSublinearIndex:
             cand_stats = self._compute_stats(cand_sorted)
             if self._pre_stats is not None and cand_stats is not None:
                 cand_pv = float(cand_stats.phase_var if cand_stats.phase_var is not None else 0.0)
+                # Optional Fresnel propagation-based coherence proxy on a 2D occupancy grid
+                if self._prop == 'fresnel':
+                    try:
+                        # Use ranks to build a compact aperture grid
+                        ranks = np.argsort(np.argsort(cand_values))
+                        G = int(max(16, min(64, 2 ** int(np.ceil(np.log2(np.sqrt(max(1, ranks.size))))))))
+                        # Map ranks to grid coordinates
+                        ys = (ranks // max(1, int(np.sqrt(max(1, ranks.size))))) % G
+                        xs = (ranks % max(1, int(np.sqrt(max(1, ranks.size))))) % G
+                        grid = np.zeros((G, G), dtype=float)
+                        for yy, xx in zip(ys, xs):
+                            grid[int(yy) % G, int(xx) % G] += 1.0
+                        I = fresnel_propagate2d(grid, z=1.0, lambda_w=1.0, dx=1.0, dy=1.0)
+                        # Use phase variance of propagated intensity as an additional measure; combine conservatively
+                        _, pv_f = phase_retrieve(I.ravel())
+                        cand_pv = min(cand_pv, float(pv_f))
+                    except Exception:
+                        pass
                 cand_Hn = float(cand_stats.gap_entropy_norm if cand_stats.gap_entropy_norm is not None else 0.0)
 
                 if self.gate_auto and (self._gate_thr_pvar is not None or self._gate_thr_Hn is not None):

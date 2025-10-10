@@ -78,7 +78,7 @@ def chudnovsky_like_sieve(N, T=50, K=50, epsilon=1.2):
 
 class ResonantSolver:
     def __init__(self, phi=(1 + np.sqrt(5)) / 2, alpha=0.05, max_iters=50, borwein_terms=12, holo=False,
-                 rh_constraint: bool = False, calib_weighting: str = 'none'):
+                 rh_constraint: bool = False, calib_weighting: str = 'none', propagate: str = 'none'):
         self.phi = phi
         self.alpha = alpha
         self.max_iters = max_iters
@@ -88,6 +88,7 @@ class ResonantSolver:
         # Experimental options
         self.rh_constraint = bool(rh_constraint)
         self.calib_weighting = str(calib_weighting)
+        self.propagate = str(propagate).lower()
     
     def _n_points(self, graph, dist_matrix=None):
         if hasattr(graph, 'coords') and graph.coords is not None:
@@ -197,6 +198,59 @@ class ResonantSolver:
                 except Exception:
                     pass
         return tour, self.score_solution(tour, graph, dist_matrix)
+
+    # -----------------
+    # Angular Spectrum Propagation (optional gating aid)
+    # -----------------
+    def _angular_spectrum_prop(self, field2d: np.ndarray, z: float = 1.0, lambda_w: float = 1.0, dx: float = 1.0) -> np.ndarray:
+        """Propagate a 2D scalar field using angular spectrum method.
+
+        Returns propagated intensity |u(x,y,z)|^2.
+        """
+        f = np.asarray(field2d, dtype=float)
+        # Frequency grids
+        ny, nx = f.shape
+        fx = np.fft.fftfreq(nx, d=dx)
+        fy = np.fft.fftfreq(ny, d=dx)
+        FX, FY = np.meshgrid(fx, fy)
+        k = 2 * np.pi / max(lambda_w, 1e-12)
+        kx = 2 * np.pi * FX
+        ky = 2 * np.pi * FY
+        kz_sq = np.maximum(0.0, k * k - (kx * kx + ky * ky))
+        kz = np.sqrt(kz_sq)
+        H = np.exp(1j * z * kz)
+        U0 = np.fft.fft2(f)
+        Uz = U0 * H
+        uz = np.fft.ifft2(Uz)
+        return np.abs(uz) ** 2
+
+    @staticmethod
+    def holo_count_reduction(adj_matrix: np.ndarray) -> float:
+        """Valiant-style reduction proxy: Pfaffian via sqrt|det| of skew block.
+
+        For a (possibly rectangular) adjacency-like matrix A, form a skew-symmetric
+        block matrix [[0, A], [-A^T, 0]] and return sqrt(|det|) as a matching count proxy.
+        """
+        try:
+            A = np.asarray(adj_matrix, dtype=float)
+            m, n = A.shape
+            # Build skew-symmetric block of even dimension
+            Zm = np.zeros((m, m), dtype=float)
+            Zn = np.zeros((n, n), dtype=float)
+            top = np.concatenate([Zm, A], axis=1)
+            bot = np.concatenate([-A.T, Zn], axis=1)
+            S = np.concatenate([top, bot], axis=0)
+            # Use holographic_permanent as a stable fallback if det overflows
+            try:
+                from scipy.linalg import det as _det
+                val = float(np.sqrt(np.abs(_det(S))))
+            except Exception:
+                val = float(holographic_permanent(A))
+            if not np.isfinite(val):
+                val = 0.0
+            return val
+        except Exception:
+            return 0.0
     
     def score_solution(self, solution, graph, dist_matrix=None):
         problem_type = getattr(graph, 'type', 'tsp')
@@ -227,7 +281,30 @@ class ResonantSolver:
                 candidate = np.append(tour_open, tour_open[0])
                 if self.holo:
                     try:
-                        if self.invariant(graph, candidate) < self.invariant(graph, tour):
+                        accept = self.invariant(graph, candidate) < self.invariant(graph, tour)
+                        # Optional angular-spectrum gating: reject if propagated field is highly incoherent
+                        if not accept and self.propagate == 'angular':
+                            # Build a simple 2D occupancy field from tour mids on a fixed grid
+                            mids = self.get_mids(graph.coords[candidate])
+                            # Normalize to [0,1]^2
+                            mins = np.min(graph.coords, axis=0)
+                            maxs = np.max(graph.coords, axis=0)
+                            span = np.where(maxs - mins == 0.0, 1.0, maxs - mins)
+                            mids_n = (mids - mins) / span
+                            G = 64
+                            H2, _, _ = np.histogram2d(mids_n[:, 0], mids_n[:, 1], bins=G, range=[[0,1],[0,1]])
+                            prop_I = self._angular_spectrum_prop(H2, z=1.0 + 0.1 * it, lambda_w=1.0, dx=1.0)
+                            # Use phase_retrieve variance on flattened intensity as incoherence proxy
+                            _, pvar = phase_retrieve(prop_I.ravel())
+                            # Gate: if more coherent (lower var) than current tour's propagated field, allow tie acceptance
+                            H2_curr, _, _ = np.histogram2d(((self.get_mids(graph.coords[tour]) - mins) / span)[:,0],
+                                                           ((self.get_mids(graph.coords[tour]) - mins) / span)[:,1],
+                                                           bins=G, range=[[0,1],[0,1]])
+                            prop_I_curr = self._angular_spectrum_prop(H2_curr, z=1.0 + 0.1 * it, lambda_w=1.0, dx=1.0)
+                            _, pvar_curr = phase_retrieve(prop_I_curr.ravel())
+                            if pvar < pvar_curr * 0.98:  # small improvement margin
+                                accept = True
+                        if accept:
                             tour = candidate
                     except Exception:
                         tour = candidate
