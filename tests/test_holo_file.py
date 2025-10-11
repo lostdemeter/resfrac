@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from resfrac.tools.holo_file import (
     encode_holo, decode_holo, generate_checkerboard,
-    compute_psnr, benchmark_holo_vs_png
+    compute_psnr, benchmark_holo_vs_png, generate_color_gradient
 )
 
 
@@ -226,6 +226,27 @@ class TestHoloFileFormat(unittest.TestCase):
         encode_holo(img, p_cplx, quantize=False, mode='complex')
         recon_cplx = decode_holo(p_cplx)
         self.assertTrue(np.isinf(compute_psnr(img, recon_cplx)))
+
+    def test_ps4color_lossless(self):
+        """Lossless color via ps4color should reconstruct exactly with float32 payload."""
+        img_rgb = generate_color_gradient(size=64, noise_std=0.0)
+        p = self.temp_path / "lossless_ps4color.holo"
+        encode_holo(img_rgb, p, quantize=False, mode='ps4color')
+        recon = decode_holo(p)
+        self.assertEqual(recon.shape, img_rgb.shape)
+        self.assertTrue(np.isinf(compute_psnr(img_rgb, recon)))
+
+    def test_color_mode_smoke(self):
+        """Angle-multiplexed color should run encode/decode without errors and return RGB image."""
+        img_rgb = generate_color_gradient(size=64, noise_std=0.05)
+        p = self.temp_path / "color_smoke.holo"
+        # Use uint8 quantization for small file; not necessarily high PSNR
+        encode_holo(img_rgb, p, quantize=True, mode='color')
+        recon = decode_holo(p)
+        # Should reconstruct an RGB image in [0,1]
+        self.assertEqual(recon.ndim, 3)
+        self.assertEqual(recon.shape[:2], img_rgb.shape[:2])
+        self.assertGreater(compute_psnr(img_rgb, recon), 3.0)
 
 
 class TestHolographicProperties(unittest.TestCase):

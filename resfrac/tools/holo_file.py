@@ -20,6 +20,7 @@ import zlib
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
+from matplotlib import colors as mcolors
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
@@ -55,13 +56,18 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
         Hologram intensity array (before quantization).
     """
     image = np.asarray(image, dtype=np.float32)
-    if image.ndim != 2:
-        raise ValueError(f"Image must be 2D, got shape {image.shape}")
-    
-    height, width = image.shape
-    
-    # Object wave: sqrt(intensity) with flat phase (planar scene)
-    O = np.sqrt(np.clip(image, 0, 1)) * np.exp(1j * 0)
+    if mode in ("color", "ps4color"):
+        # Accept either grayscale (expand to RGB later) or RGB
+        if image.ndim == 2:
+            height, width = image.shape
+        elif image.ndim == 3 and image.shape[2] == 3:
+            height, width = image.shape[:2]
+        else:
+            raise ValueError(f"{mode} expects image shape (H,W) or (H,W,3), got {image.shape}")
+    else:
+        if image.ndim != 2:
+            raise ValueError(f"Image must be 2D, got shape {image.shape}")
+        height, width = image.shape
     
     # Reference wave: tilted plane wave for off-axis separation
     # Pixel indices (j, i); kx, ky are cycles/pixel (normalized frequency)
@@ -73,6 +79,8 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
     scale_factor = 4.0  # For intensity normalization to [0,1]
 
     if mode == "offaxis1":
+        # Object wave: sqrt(intensity) with flat phase (planar scene)
+        O = np.sqrt(np.clip(image, 0, 1)) * np.exp(1j * 0)
         # Interference pattern: |O + R|², theoretical range [0,4]
         holo_raw = np.abs(O + R) ** 2
         holo = np.clip(holo_raw / scale_factor, 0.0, 1.0)
@@ -93,6 +101,8 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
         extra = {"frames": 1, "phases": [0.0]}
 
     elif mode == "ps4":
+        # Object wave for phase-shifting path
+        O = np.sqrt(np.clip(image, 0, 1)) * np.exp(1j * 0)
         # Four phase steps: 0, 90, 180, 270 degrees
         phases = [0.0, 0.5*np.pi, np.pi, 1.5*np.pi]
         frames = []
@@ -110,7 +120,89 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
         header_mode = "ps4"
         extra = {"frames": 4, "phases": phases}
 
+    elif mode == "ps4color":
+        # Lossless color via 4-phase per channel (12 frames total)
+        if image.ndim == 2:
+            img_rgb = np.repeat(image[:, :, None], 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            img_rgb = np.clip(image, 0, 1).astype(np.float32)
+        else:
+            raise ValueError(f"ps4color expects image shape (H,W,3), got {image.shape}")
+
+        phases = [0.0, 0.5*np.pi, np.pi, 1.5*np.pi]
+        stacks = []  # will become (3, 4, H, W)
+        for c in range(3):
+            Oc = np.sqrt(np.clip(img_rgb[:, :, c], 0, 1)) * np.exp(1j * 0)
+            frames = []
+            for phi in phases:
+                R_phi = R * np.exp(1j * phi)
+                I = np.abs(Oc + R_phi) ** 2
+                frames.append(np.clip(I / scale_factor, 0.0, 1.0))
+            stacks.append(np.stack(frames, axis=0))
+        stack = np.stack(stacks, axis=0)  # (3, 4, H, W)
+
+        if quantize:
+            payload = (stack * 255).astype(np.uint8)
+            bit_depth = 8
+        else:
+            payload = stack.astype(np.float32)
+            bit_depth = 32
+        header_mode = "ps4color"
+        extra = {"frames": 4, "phases": phases, "channels": 3}
+
+    elif mode == "color":
+        # Angle-multiplexed RGB channels into a single intensity hologram
+        # Expect image as (H, W, 3) float32 in [0,1]
+        if image.ndim == 2:
+            img_rgb = np.repeat(image[:, :, None], 3, axis=2)
+        elif image.ndim == 3 and image.shape[2] == 3:
+            img_rgb = np.clip(image, 0, 1).astype(np.float32)
+        else:
+            raise ValueError(f"Color mode expects image shape (H,W,3), got {image.shape}")
+
+        # Default per-channel carriers, defined as offsets relative to (kx, ky)
+        # Keep within Nyquist (< 0.5 cycles/pixel)
+        dx = [0.18, 0.00, -0.18]
+        dy = [0.00, 0.18, -0.18]
+        kx_list = [float(kx) + dx[i] for i in range(3)]
+        ky_list = [float(ky) + dy[i] for i in range(3)]
+        # Build object field as sum of channel object waves on distinct carriers
+        O_r = np.sqrt(np.clip(img_rgb[:, :, 0], 0, 1)) * np.exp(1j * 0)
+        O_g = np.sqrt(np.clip(img_rgb[:, :, 1], 0, 1)) * np.exp(1j * 0)
+        O_b = np.sqrt(np.clip(img_rgb[:, :, 2], 0, 1)) * np.exp(1j * 0)
+
+        X, Y = np.meshgrid(x, y)
+        C_r = np.exp(1j * 2 * np.pi * (kx_list[0] * X + ky_list[0] * Y))
+        C_g = np.exp(1j * 2 * np.pi * (kx_list[1] * X + ky_list[1] * Y))
+        C_b = np.exp(1j * 2 * np.pi * (kx_list[2] * X + ky_list[2] * Y))
+        # Scale objects vs reference to reduce O_i * O_j leakage terms
+        alpha = 0.5
+        O_total = alpha * (O_r * C_r + O_g * C_g + O_b * C_b)
+
+        # Reference wave (kx, ky) as provided, for robust off-axis separation
+        R0 = R
+        holo_raw = np.abs(O_total + R0) ** 2
+        # Normalize dynamically to [0,1]
+        max_val = float(np.max(holo_raw)) if np.isfinite(np.max(holo_raw)) else 1.0
+        scale_factor = max(max_val, 1e-6)
+        holo = np.clip(holo_raw / scale_factor, 0.0, 1.0)
+
+        if quantize:
+            bit_depth = 8
+            from io import BytesIO as _BytesIO
+            _bio = _BytesIO()
+            plt.imsave(_bio, holo, cmap='gray', format='png', vmin=0, vmax=1)
+            payload = _bio.getvalue()  # PNG bytes
+            compression = "png"
+        else:
+            payload = holo.astype(np.float32)
+            bit_depth = 32
+        header_mode = "color"
+        extra = {"channels": 3, "color_kx": kx_list, "color_ky": ky_list, "color_alpha": alpha}
+
     elif mode == "complex":
+        # Object wave for complex storage
+        O = np.sqrt(np.clip(image, 0, 1)) * np.exp(1j * 0)
         # Store complex object field directly: O = sqrt(image) * exp(i*0)
         # Optional: QAM modulation to compact indices
 
@@ -167,7 +259,7 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
             extra = {"channels": 2}
             scale_factor = 1.0
     else:
-        raise ValueError("mode must be one of {'offaxis1','ps4','complex'}")
+        raise ValueError("mode must be one of {'offaxis1','ps4','ps4color','complex','color'}")
 
     # Build JSON header with metadata
     # Compute checksum over the uncompressed array bytes when payload is ndarray,
@@ -199,8 +291,8 @@ def encode_holo(image, output_file, kx=0.3, ky=0.3, lambda_w=1.0, quantize=True,
         **extra,
         "checksum": f"{checksum:08x}",
     }
-    # Mark compression if used (only offaxis1 uint8 path currently)
-    if mode == "offaxis1" and quantize and 'compression' not in header:
+    # Mark compression if used (offaxis1/color uint8 path currently)
+    if mode in ("offaxis1", "color") and quantize and 'compression' not in header:
         header["compression"] = compression or None  # "png"
         header["payload_format"] = "png"
     # Mark QAM payload format for complex mode when indices are stored
@@ -337,6 +429,62 @@ def decode_holo(input_file, phase_retrieval: bool = False):
         C = ReC + 1j * ImC
         recon = np.abs(C) ** 2
 
+    elif mode == "ps4color":
+        # Lossless color via 4-phase per channel
+        # Shape: (3, 4, H, W) with same normalization as ps4
+        I = holo * scale
+        if I.ndim != 4 or I.shape[0] != 3 or I.shape[1] != 4:
+            raise ValueError("ps4color data must have shape (3, 4, H, W)")
+        chans = []
+        for c in range(3):
+            I0, I90, I180, I270 = I[c, 0], I[c, 1], I[c, 2], I[c, 3]
+            ReC = (I0 - I180) / 4.0
+            ImC = (I270 - I90) / 4.0
+            C = ReC + 1j * ImC
+            chan = np.abs(C) ** 2
+            chans.append(chan)
+        recon = np.stack(chans, axis=2)
+
+    elif mode == "color":
+        # Per-channel reconstruction: mix by (kxi - kx, kyi - ky) and low-pass around DC
+        I = holo * scale
+        # Remove DC to suppress residual carrier and apply mild apodization
+        I = I - float(np.mean(I))
+        x = np.arange(width, dtype=float)
+        y = np.arange(height, dtype=float)
+        X, Y = np.meshgrid(x, y)
+        fx = np.fft.fftfreq(width)
+        fy = np.fft.fftfreq(height)
+        Fx, Fy = np.meshgrid(fx, fy)
+        # Precompute radial frequency grid for adaptive passband selection
+        rgrid = np.sqrt(Fx**2 + Fy**2)
+        kx_list = [float(k) for k in header.get('color_kx', [float(kx)+0.18, float(kx), float(kx)-0.18])]
+        ky_list = [float(k) for k in header.get('color_ky', [float(ky), float(ky)+0.18, float(ky)-0.18])]
+        chans = []
+        for kxi, kyi in zip(kx_list, ky_list):
+            demod = np.exp(-1j * 2 * np.pi * (((kxi - kx) * X) + ((kyi - ky) * Y)))
+            Hf = np.fft.fft2(I * demod)
+            # Estimate effective bandwidth by radial cumulative energy (98%)
+            S = np.abs(Hf)
+            # Histogram radial energy
+            bins = np.linspace(0.0, 0.5, 256)
+            hist, edges = np.histogram(rgrid.ravel(), bins=bins, weights=S.ravel())
+            csum = np.cumsum(hist)
+            total = csum[-1] if csum.size else 1.0
+            idx = int(np.searchsorted(csum, 0.98 * total)) if total > 0 else len(bins)//4
+            r98 = float(edges[min(max(idx, 1), len(edges)-1)])
+            # Build Gaussian LPF with radius tied to r98 (guard rails)
+            cutoff = min(max(r98 * 1.15, 0.08), 0.45)
+            sigma = max(cutoff / 2.5, 1e-3)
+            gauss_lp = np.exp(-0.5 * (rgrid**2) / (sigma**2))
+            u = np.fft.ifft2(Hf * gauss_lp)
+            mag = np.abs(u)
+            m = float(np.max(mag)) if np.isfinite(np.max(mag)) else 1.0
+            m = max(m, 1e-12)
+            chans.append((mag / m) ** 2)
+        recon = np.stack(chans, axis=2)
+        recon = np.clip(recon, 0, 1)
+
     elif mode == "complex":
         if payload_format == 'qam':
             # Demap QAM indices back to complex field
@@ -382,6 +530,35 @@ def generate_checkerboard(size=256, block=16):
     return img
 
 
+def load_image_as_rgb(path):
+    """Load image as RGB float32 [0,1]."""
+    img = mpimg.imread(path)
+    img = img.astype(np.float32)
+    if img.max() > 1.0:
+        img = img / 255.0
+    if img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    elif img.ndim == 3 and img.shape[2] >= 3:
+        img = img[:, :, :3]
+    else:
+        raise ValueError(f"Unsupported image shape for RGB: {img.shape}")
+    return img
+
+def generate_color_gradient(size=256, noise_std=0.05):
+    """Generate a colorful HSV gradient with optional noise, returns (H,W,3) in [0,1]."""
+    x = np.linspace(0, 1, size, dtype=np.float32)
+    y = np.linspace(0, 1, size, dtype=np.float32)
+    H = np.tile(x[None, :], (size, 1))  # hue along x
+    S = np.ones((size, size), dtype=np.float32)
+    V = np.ones((size, size), dtype=np.float32)
+    hsv = np.stack([H, S, V], axis=2)
+    rgb = mcolors.hsv_to_rgb(hsv).astype(np.float32)
+    if noise_std and noise_std > 0:
+        rng = np.random.default_rng(42)
+        noise = rng.normal(0.0, noise_std, size=(size, size, 3)).astype(np.float32)
+        rgb = np.clip(rgb + noise, 0.0, 1.0)
+    return rgb
+
 def compute_psnr(original, reconstructed):
     """Compute Peak Signal-to-Noise Ratio in dB."""
     diff = (original - reconstructed)
@@ -406,8 +583,11 @@ def load_image_as_bw(path):
 
 
 def save_image(path, img):
-    """Save float32 [0,1] image to file."""
-    plt.imsave(path, img, cmap='gray', vmin=0, vmax=1)
+    """Save float32 [0,1] image to file (handles grayscale or RGB)."""
+    if img.ndim == 2:
+        plt.imsave(path, img, cmap='gray', vmin=0, vmax=1)
+    else:
+        plt.imsave(path, np.clip(img, 0, 1), vmin=0, vmax=1)
 
 
 # ========== Benchmarking ==========
@@ -451,15 +631,20 @@ def benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, phase=False,
     # === PNG baseline ===
     start = time.time()
     bio = BytesIO()
-    plt.imsave(bio, img, cmap='gray', format='png', vmin=0, vmax=1)
+    if getattr(img, 'ndim', 2) == 2:
+        plt.imsave(bio, img, cmap='gray', format='png', vmin=0, vmax=1)
+    else:
+        plt.imsave(bio, np.clip(img, 0, 1), format='png', vmin=0, vmax=1)
     png_size = len(bio.getvalue())
     png_enc_time = time.time() - start
     
     start = time.time()
     bio.seek(0)
     png_recon = mpimg.imread(bio, format='png')
-    if png_recon.ndim == 3:
+    if png_recon.ndim == 3 and getattr(img, 'ndim', 2) == 2:
         png_recon = np.mean(png_recon[:, :, :3], axis=2)
+    elif png_recon.ndim == 3 and getattr(img, 'ndim', 2) == 3:
+        png_recon = png_recon[:, :, :3]
     png_dec_time = time.time() - start
     
     results = {
@@ -526,12 +711,18 @@ def visualize_encoding(img, holo_file='test.holo', output_prefix='holo_viz', mod
     # Create visualization
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     
-    axes[0].imshow(img, cmap='gray', vmin=0, vmax=1)
+    if getattr(img, 'ndim', 2) == 2:
+        axes[0].imshow(img, cmap='gray', vmin=0, vmax=1)
+    else:
+        axes[0].imshow(np.clip(img, 0, 1))
     axes[0].set_title('Original Image')
     axes[0].axis('off')
     
     if mode == 'ps4' and isinstance(payload, np.ndarray) and getattr(payload, 'ndim', 0) == 3:
         holo_show = payload[0]
+    elif mode == 'ps4color' and isinstance(payload, np.ndarray) and getattr(payload, 'ndim', 0) == 4 and payload.shape[0] == 3 and payload.shape[1] == 4:
+        # Show first channel, first phase for visualization
+        holo_show = payload[0, 0]
     elif mode == 'complex' and isinstance(payload, np.ndarray) and getattr(payload, 'ndim', 0) == 3 and payload.shape[0] == 2:
         # Show amplitude of complex field
         holo_show = np.hypot(payload[0], payload[1])
@@ -541,7 +732,10 @@ def visualize_encoding(img, holo_file='test.holo', output_prefix='holo_viz', mod
     axes[1].set_title('Hologram')
     axes[1].axis('off')
     
-    axes[2].imshow(recon, cmap='gray', vmin=0, vmax=1)
+    if getattr(recon, 'ndim', 2) == 2:
+        axes[2].imshow(recon, cmap='gray', vmin=0, vmax=1)
+    else:
+        axes[2].imshow(np.clip(recon, 0, 1))
     axes[2].set_title(f'Reconstructed (PSNR: {compute_psnr(img, recon):.1f} dB)')
     axes[2].axis('off')
     
@@ -594,8 +788,8 @@ Examples:
     parser.add_argument("--ky", type=float, default=0.3,
                        help="Reference wave tilt in y (cycles/pixel, default: 0.3)")
     parser.add_argument("--mode", type=str, default="offaxis1",
-                       choices=["offaxis1","ps4","complex"],
-                       help="Storage mode: offaxis1 (single frame), ps4 (4-phase lossless), complex (lossless)")
+                       choices=["offaxis1","ps4","ps4color","complex","color"],
+                       help="Storage mode: offaxis1 (single frame), ps4 (4-phase B&W), ps4color (4-phase per RGB), complex (field), color (RGB multiplex)")
     parser.add_argument("--no-quantize", action="store_true",
                        help="Disable uint8 quantization (use float32 for higher quality)")
     parser.add_argument("--phase", action="store_true",
@@ -615,12 +809,14 @@ Examples:
                        help="Checkerboard size for benchmark (default: 256)")
     parser.add_argument("--block", type=int, default=16,
                        help="Checkerboard block size (default: 16)")
+    parser.add_argument("--color-benchmark", action="store_true",
+                       help="Use a colorful gradient test image and color mode for benchmark")
     
     args = parser.parse_args()
     
     # === Encode Mode ===
     if args.encode:
-        img = load_image_as_bw(args.encode)
+        img = load_image_as_rgb(args.encode) if args.mode in ('color','ps4color') else load_image_as_bw(args.encode)
         output_file = args.output or 'output.holo'
         
         print(f"Encoding {args.encode} ({img.shape[0]}×{img.shape[1]}) to {output_file}...")
@@ -649,18 +845,25 @@ Examples:
     
     # === Benchmark Mode ===
     elif args.benchmark:
-        print("Generating checkerboard pattern...")
-        img = generate_checkerboard(size=args.size, block=args.block)
+        if args.color_benchmark:
+            print("Generating colorful gradient pattern...")
+            img = generate_color_gradient(size=args.size, noise_std=0.05)
+            bm_mode = args.mode if args.mode in ('color','ps4color') else 'color'
+        else:
+            print("Generating checkerboard pattern...")
+            img = generate_checkerboard(size=args.size, block=args.block)
+            bm_mode = args.mode
         
         print("Running benchmark...")
         quantize = not (args.no_quantize or args.float)
         results = benchmark_holo_vs_png(img, holo_file='test.holo', verbose=True, 
                                        phase=args.phase, quantize=quantize,
-                                       kx=args.kx, ky=args.ky, mode=args.mode, qam_order=args.qam_order)
+                                       kx=args.kx, ky=args.ky, mode=bm_mode, qam_order=args.qam_order)
         
         # Optionally save visualization
         print("\nGenerating visualization...")
-        visualize_encoding(img, 'test.holo', output_prefix='checkerboard_holo', mode=args.mode)
+        viz_prefix = 'color_holo' if args.color_benchmark else 'checkerboard_holo'
+        visualize_encoding(img, 'test.holo', output_prefix=viz_prefix, mode=bm_mode)
     
     else:
         parser.print_help()

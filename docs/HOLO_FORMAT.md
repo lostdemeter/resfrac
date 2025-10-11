@@ -59,6 +59,26 @@ NumPy `.npy` format containing a 2D array:
   - `uint16` for orders ≤ 65536
   - `uint32` otherwise
 
+#### Color Multiplexing (experimental)
+
+When `mode: "color"`, the payload stores a single intensity hologram that multiplexes three RGB channels using distinct angular carriers.
+
+- Payload format: same as `offaxis1` (either embedded PNG bytes with `bit_depth=8` and `payload_format='png'`, or raw float32 array for `bit_depth=32`).
+- Additional header fields:
+
+```json
+{
+  "mode": "color",
+  "channels": 3,
+  "color_kx": [0.05, 0.45, 0.05],
+  "color_ky": [0.05, 0.05, 0.45]
+}
+```
+
+Decoder demodulates the hologram by the difference frequency for each channel `(kxi - kx, kyi - ky)`, applies a Gaussian band-pass in the Fourier domain centered at each carrier, then inverse-FFTs and takes magnitude-squared to reconstruct per-channel intensities. The result is clipped to `[0,1]` and stacked to RGB.
+
+Note: This mode is experimental and prioritizes demonstrating angle-multiplexing for color over maximum PSNR. Carrier selection (`color_kx`, `color_ky`) and filter bandwidth significantly affect quality.
+
 When QAM is enabled, the header includes:
 
 ```json
@@ -207,6 +227,13 @@ python -m resfrac.tools.holo_file --encode input.png --output complex_qam.holo \
 
 # Benchmark complex QAM
 python -m resfrac.tools.holo_file --benchmark --mode complex --qam-order 256
+
+# Experimental: Color multiplexing
+python -m resfrac.tools.holo_file --encode input_color.png --output color.holo \
+    --mode color --no-quantize
+
+# Color benchmark (synthetic gradient)
+python -m resfrac.tools.holo_file --benchmark --color-benchmark
 ```
 
 ### Python API
